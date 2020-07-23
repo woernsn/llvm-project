@@ -25,6 +25,8 @@ using System.Runtime.InteropServices;
 using System.Xml.Linq;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Windows.Forms;
 
 namespace LLVM.ClangFormat
 {
@@ -40,6 +42,7 @@ namespace LLVM.ClangFormat
         private string formatOnSaveFileExtensions =
             ".c;.cpp;.cxx;.cc;.tli;.tlh;.h;.hh;.hpp;.hxx;.hh;.inl;" +
             ".java;.js;.ts;.m;.mm;.proto;.protodevel;.td";
+        private string globalClangFile = "%APPDATA%\\vizpkg\\data\\stylesheets\\format\\default.json";
 
         public OptionPageGrid Clone()
         {
@@ -98,6 +101,7 @@ namespace LLVM.ClangFormat
                      "YAML configuration snippet:\n" +
                      "  The content of a .clang-format configuration file, as string.\n" +
                      "  Example: '{BasedOnStyle: \"LLVM\", IndentWidth: 8}'\n\n" +
+                     "This is only used if the 'Global CLang File' is not set!\n\n" +
                      "See also: http://clang.llvm.org/docs/ClangFormatStyleOptions.html.")]
         [TypeConverter(typeof(StyleConverter))]
         public string Style
@@ -195,7 +199,17 @@ namespace LLVM.ClangFormat
             get { return formatOnSaveFileExtensions; }
             set { formatOnSaveFileExtensions = value; }
         }
+
+        [Category("Format Options")]
+        [DisplayName("Global CLang File")]
+        [Description("The path to the global CLang file that should be used by Visual Studio.")]
+        public string GlobalClangFile
+        {
+            get { return globalClangFile; }
+            set { globalClangFile = value; }
+        }
     }
+
 
     [PackageRegistration(UseManagedResourcesOnly = true)]
     [InstalledProductRegistration("#110", "#112", "1.0", IconResourceID = 400)]
@@ -341,7 +355,8 @@ namespace LLVM.ClangFormat
             try
             {
                 string replacements = RunClangFormat(text, start, end, path, filePath, options);
-                ApplyClangFormatReplacements(replacements, view);
+                if (replacements != "")
+                    ApplyClangFormatReplacements(replacements, view);
             }
             catch (Exception e)
             {
@@ -383,8 +398,40 @@ namespace LLVM.ClangFormat
             process.StartInfo.Arguments = " -offset " + offset +
                                           " -length " + length +
                                           " -output-replacements-xml " +
-                                          " -style \"" + style + "\"" +
                                           " -fallback-style \"" + fallbackStyle + "\"";
+
+            bool usingGlobalClangFile = true;
+
+            string globalClangFile = options.GlobalClangFile;
+            if (!string.IsNullOrEmpty(globalClangFile))
+            {
+                if (globalClangFile.ToLower().Contains("%appdata%"))
+                {
+                    string appDataDir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                    globalClangFile = Regex.Replace(globalClangFile, "%APPDATA%", appDataDir, RegexOptions.IgnoreCase);
+                }
+
+                if (!File.Exists(globalClangFile))
+                {
+                    DialogResult dialogResult = MessageBox.Show("CLang file not found:\n\n" + globalClangFile + "\n\nDo you want to use the fallback method ('" + style + "')?", "CLang file not found", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    if (dialogResult == DialogResult.No)
+                        return "";
+                }
+                else
+                {
+                    string clangFileContent = File.ReadAllText(globalClangFile, Encoding.UTF8);
+                    clangFileContent = Regex.Replace(clangFileContent, @"\r\n?|\n", " ");
+                    process.StartInfo.Arguments += " -style \"" + clangFileContent + "\"";
+                }
+            }
+            else
+            {
+                usingGlobalClangFile = false;
+            }
+
+            if (!usingGlobalClangFile)
+                process.StartInfo.Arguments += " -style \"" + style + "\"";
+
             if (options.SortIncludes)
               process.StartInfo.Arguments += " -sort-includes ";
             string assumeFilename = options.AssumeFilename;
