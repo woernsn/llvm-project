@@ -182,7 +182,8 @@ namespace LLVM.ClangFormat
         [Category("Format On Save")]
         [DisplayName("Enable")]
         [Description("Enable running clang-format when modified files are saved. " +
-                     "Will only format if Style is found (ignores Fallback Style)."
+                     "Will only format if Style is found (ignores Fallback Style).\n" +
+                     "Will only format if in the root directory a .autoformat file is found."
             )]
         public bool FormatOnSave
         {
@@ -288,6 +289,12 @@ namespace LLVM.ClangFormat
                 return;
 
             if (!Vsix.IsDocumentDirty(document))
+                return;
+
+            DTE dte = (DTE)GetService(typeof(DTE));
+            string solutionDir = System.IO.Path.GetDirectoryName(dte.Solution.FullName);
+            string autoFormatFile = System.IO.Path.GetFullPath(Path.Combine(solutionDir, @"..\..\.autoformat"));
+            if (!File.Exists(autoFormatFile))
                 return;
 
             var optionsWithNoFallbackStyle = GetUserOptions().Clone();
