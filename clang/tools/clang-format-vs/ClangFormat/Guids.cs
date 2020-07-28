@@ -4,8 +4,8 @@ namespace LLVM.ClangFormat
 {
     static class GuidList
     {
-        public const string guidClangFormatPkgString = "c5286038-25d3-4f65-83a8-51fa2df4a146";
-        public const string guidClangFormatCmdSetString = "e39cbab1-0f96-4022-a2bc-da5a9db7eb78";
+        public const string guidClangFormatPkgString = "8fe49268-ed2b-432a-8361-0f9365a66aab";
+        public const string guidClangFormatCmdSetString = "999a3308-93f9-43a6-9dac-1794663dd21b";
 
         public static readonly Guid guidClangFormatCmdSet = new Guid(guidClangFormatCmdSetString);
     };

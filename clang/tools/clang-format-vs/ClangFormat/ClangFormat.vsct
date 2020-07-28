@@ -102,20 +102,20 @@
 
   <Symbols>
     <!-- This is the package guid. -->
-    <GuidSymbol name="guidClangFormatPkg" value="{c5286038-25d3-4f65-83a8-51fa2df4a146}" />
+    <GuidSymbol name="guidClangFormatPkg" value="{8fe49268-ed2b-432a-8361-0f9365a66aab}" />
     
     <!-- This is the guid used to group the menu commands together -->
-    <GuidSymbol name="guidClangFormatCmdSet" value="{e39cbab1-0f96-4022-a2bc-da5a9db7eb78}">
+    <GuidSymbol name="guidClangFormatCmdSet" value="{999a3308-93f9-43a6-9dac-1794663dd21b}">
 
       <IDSymbol name="MyMenuGroup" value="0x1020" />
       <IDSymbol name="cmdidClangFormatSelection" value="0x0100" />
       <IDSymbol name="cmdidClangFormatDocument" value="0x0101" />
     </GuidSymbol>
 
-    <GuidSymbol name="guidTextEditor" value="{8B382828-6202-11d1-8870-0000F87579D2}" />
+    <GuidSymbol name="guidTextEditor" value="{69115b0c-18d4-450e-9ea3-e18a3ea94fa2}" />
 
 
-    <GuidSymbol name="guidImages" value="{6d53937b-9ae1-42e1-8849-d876dcdbad7b}" >
+    <GuidSymbol name="guidImages" value="{86f05dba-460c-4712-a7d3-18e8bd7368b3}" >
       <IDSymbol name="bmpPic1" value="1" />
       <IDSymbol name="bmpPic2" value="2" />
       <IDSymbol name="bmpPicSearch" value="3" />
