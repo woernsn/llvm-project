@@ -193,7 +193,7 @@ bool LiveIntervals::computeVirtRegInterval(LiveInterval &LI) {
   assert(LICalc && "LICalc not initialized.");
   assert(LI.empty() && "Should only compute empty intervals.");
   LICalc->reset(MF, getSlotIndexes(), DomTree, &getVNInfoAllocator());
-  LICalc->calculate(LI, MRI->shouldTrackSubRegLiveness(LI.reg));
+  LICalc->calculate(LI, MRI->shouldTrackSubRegLiveness(LI.reg()));
   return computeDeadValues(LI, nullptr);
 }
 
@@ -224,6 +224,15 @@ void LiveIntervals::computeRegMasks() {
       RegMaskSlots.push_back(Indexes->getMBBStartIdx(&MBB));
       RegMaskBits.push_back(Mask);
     }
+
+    // Unwinders may clobber additional registers.
+    // FIXME: This functionality can possibly be merged into
+    // MachineBasicBlock::getBeginClobberMask().
+    if (MBB.isEHPad())
+      if (auto *Mask = TRI->getCustomEHPadPreservedMask(*MBB.getParent())) {
+        RegMaskSlots.push_back(Indexes->getMBBStartIdx(&MBB));
+        RegMaskBits.push_back(Mask);
+      }
 
     for (const MachineInstr &MI : MBB) {
       for (const MachineOperand &MO : MI.operands()) {
@@ -444,13 +453,13 @@ void LiveIntervals::extendSegmentsToUses(LiveRange &Segments,
 bool LiveIntervals::shrinkToUses(LiveInterval *li,
                                  SmallVectorImpl<MachineInstr*> *dead) {
   LLVM_DEBUG(dbgs() << "Shrink: " << *li << '\n');
-  assert(Register::isVirtualRegister(li->reg) &&
+  assert(Register::isVirtualRegister(li->reg()) &&
          "Can only shrink virtual registers");
 
   // Shrink subregister live ranges.
   bool NeedsCleanup = false;
   for (LiveInterval::SubRange &S : li->subranges()) {
-    shrinkToUses(S, li->reg);
+    shrinkToUses(S, li->reg());
     if (S.empty())
       NeedsCleanup = true;
   }
@@ -460,8 +469,8 @@ bool LiveIntervals::shrinkToUses(LiveInterval *li,
   // Find all the values used, including PHI kills.
   ShrinkToUsesWorkList WorkList;
 
-  // Visit all instructions reading li->reg.
-  unsigned Reg = li->reg;
+  // Visit all instructions reading li->reg().
+  unsigned Reg = li->reg();
   for (MachineInstr &UseMI : MRI->reg_instructions(Reg)) {
     if (UseMI.isDebugValue() || !UseMI.readsVirtualRegister(Reg))
       continue;
@@ -514,7 +523,7 @@ bool LiveIntervals::computeDeadValues(LiveInterval &LI,
 
     // Is the register live before? Otherwise we may have to add a read-undef
     // flag for subregister defs.
-    unsigned VReg = LI.reg;
+    unsigned VReg = LI.reg();
     if (MRI->shouldTrackSubRegLiveness(VReg)) {
       if ((I == LI.begin() || std::prev(I)->end < Def) && !VNI->isPHIDef()) {
         MachineInstr *MI = getInstructionFromIndex(Def);
@@ -534,7 +543,7 @@ bool LiveIntervals::computeDeadValues(LiveInterval &LI,
       // This is a dead def. Make sure the instruction knows.
       MachineInstr *MI = getInstructionFromIndex(Def);
       assert(MI && "No instruction defining live value");
-      MI->addRegisterDead(LI.reg, TRI);
+      MI->addRegisterDead(LI.reg(), TRI);
       if (HaveDeadDef)
         MayHaveSplitComponents = true;
       HaveDeadDef = true;
@@ -1028,7 +1037,8 @@ public:
 
       // For physregs, only update the regunits that actually have a
       // precomputed live range.
-      for (MCRegUnitIterator Units(Reg, &TRI); Units.isValid(); ++Units)
+      for (MCRegUnitIterator Units(Reg.asMCReg(), &TRI); Units.isValid();
+           ++Units)
         if (LiveRange *LR = getRegUnitLI(*Units))
           updateRange(*LR, *Units, LaneBitmask::getNone());
     }
@@ -1674,7 +1684,7 @@ LiveIntervals::repairIntervalsInRange(MachineBasicBlock *MBB,
   }
 }
 
-void LiveIntervals::removePhysRegDefAt(unsigned Reg, SlotIndex Pos) {
+void LiveIntervals::removePhysRegDefAt(MCRegister Reg, SlotIndex Pos) {
   for (MCRegUnitIterator Unit(Reg, TRI); Unit.isValid(); ++Unit) {
     if (LiveRange *LR = getCachedRegUnit(*Unit))
       if (VNInfo *VNI = LR->getVNInfoAt(Pos))
@@ -1707,7 +1717,7 @@ void LiveIntervals::splitSeparateComponents(LiveInterval &LI,
   if (NumComp <= 1)
     return;
   LLVM_DEBUG(dbgs() << "  Split " << NumComp << " components: " << LI << '\n');
-  unsigned Reg = LI.reg;
+  unsigned Reg = LI.reg();
   const TargetRegisterClass *RegClass = MRI->getRegClass(Reg);
   for (unsigned I = 1; I < NumComp; ++I) {
     Register NewVReg = MRI->createVirtualRegister(RegClass);

@@ -1309,6 +1309,9 @@ bool LLParser::ParseFnAttributeValuePairs(AttrBuilder &B,
     case lltok::kw_inlinehint: B.addAttribute(Attribute::InlineHint); break;
     case lltok::kw_jumptable: B.addAttribute(Attribute::JumpTable); break;
     case lltok::kw_minsize: B.addAttribute(Attribute::MinSize); break;
+    case lltok::kw_mustprogress:
+      B.addAttribute(Attribute::MustProgress);
+      break;
     case lltok::kw_naked: B.addAttribute(Attribute::Naked); break;
     case lltok::kw_nobuiltin: B.addAttribute(Attribute::NoBuiltin); break;
     case lltok::kw_noduplicate: B.addAttribute(Attribute::NoDuplicate); break;
@@ -1657,9 +1660,16 @@ bool LLParser::ParseOptionalParamAttrs(AttrBuilder &B) {
     }
     case lltok::kw_byval: {
       Type *Ty;
-      if (ParseByValWithOptionalType(Ty))
+      if (ParseOptionalTypeAttr(Ty, lltok::kw_byval))
         return true;
       B.addByValAttr(Ty);
+      continue;
+    }
+    case lltok::kw_sret: {
+      Type *Ty;
+      if (ParseOptionalTypeAttr(Ty, lltok::kw_sret))
+        return true;
+      B.addStructRetAttr(Ty);
       continue;
     }
     case lltok::kw_preallocated: {
@@ -1704,7 +1714,6 @@ bool LLParser::ParseOptionalParamAttrs(AttrBuilder &B) {
     case lltok::kw_readonly:        B.addAttribute(Attribute::ReadOnly); break;
     case lltok::kw_returned:        B.addAttribute(Attribute::Returned); break;
     case lltok::kw_signext:         B.addAttribute(Attribute::SExt); break;
-    case lltok::kw_sret:            B.addAttribute(Attribute::StructRet); break;
     case lltok::kw_swifterror:      B.addAttribute(Attribute::SwiftError); break;
     case lltok::kw_swiftself:       B.addAttribute(Attribute::SwiftSelf); break;
     case lltok::kw_writeonly:       B.addAttribute(Attribute::WriteOnly); break;
@@ -1718,6 +1727,7 @@ bool LLParser::ParseOptionalParamAttrs(AttrBuilder &B) {
     case lltok::kw_inlinehint:
     case lltok::kw_jumptable:
     case lltok::kw_minsize:
+    case lltok::kw_mustprogress:
     case lltok::kw_naked:
     case lltok::kw_nobuiltin:
     case lltok::kw_noduplicate:
@@ -1822,6 +1832,7 @@ bool LLParser::ParseOptionalReturnAttrs(AttrBuilder &B) {
     case lltok::kw_inlinehint:
     case lltok::kw_jumptable:
     case lltok::kw_minsize:
+    case lltok::kw_mustprogress:
     case lltok::kw_naked:
     case lltok::kw_nobuiltin:
     case lltok::kw_noduplicate:
@@ -2571,9 +2582,9 @@ bool LLParser::ParseParameterList(SmallVectorImpl<ParamInfo> &ArgList,
 /// ParseByValWithOptionalType
 ///   ::= byval
 ///   ::= byval(<ty>)
-bool LLParser::ParseByValWithOptionalType(Type *&Result) {
+bool LLParser::ParseOptionalTypeAttr(Type *&Result, lltok::Kind AttrName) {
   Result = nullptr;
-  if (!EatIfPresent(lltok::kw_byval))
+  if (!EatIfPresent(AttrName))
     return true;
   if (!EatIfPresent(lltok::lparen))
     return false;
@@ -4637,6 +4648,27 @@ bool LLParser::ParseDIBasicType(MDNode *&Result, bool IsDistinct) {
   return false;
 }
 
+/// ParseDIStringType:
+///   ::= !DIStringType(name: "character(4)", size: 32, align: 32)
+bool LLParser::ParseDIStringType(MDNode *&Result, bool IsDistinct) {
+#define VISIT_MD_FIELDS(OPTIONAL, REQUIRED)                                    \
+  OPTIONAL(tag, DwarfTagField, (dwarf::DW_TAG_string_type));                   \
+  OPTIONAL(name, MDStringField, );                                             \
+  OPTIONAL(stringLength, MDField, );                                           \
+  OPTIONAL(stringLengthExpression, MDField, );                                 \
+  OPTIONAL(size, MDUnsignedField, (0, UINT64_MAX));                            \
+  OPTIONAL(align, MDUnsignedField, (0, UINT32_MAX));                           \
+  OPTIONAL(encoding, DwarfAttEncodingField, );
+  PARSE_MD_FIELDS();
+#undef VISIT_MD_FIELDS
+
+  Result = GET_OR_DISTINCT(DIStringType,
+                           (Context, tag.Val, name.Val, stringLength.Val,
+                            stringLengthExpression.Val, size.Val, align.Val,
+                            encoding.Val));
+  return false;
+}
+
 /// ParseDIDerivedType:
 ///   ::= !DIDerivedType(tag: DW_TAG_pointer_type, name: "int", file: !0,
 ///                      line: 7, scope: !1, baseType: !2, size: 32,
@@ -4691,9 +4723,17 @@ bool LLParser::ParseDICompositeType(MDNode *&Result, bool IsDistinct) {
   OPTIONAL(discriminator, MDField, );                                          \
   OPTIONAL(dataLocation, MDField, );                                           \
   OPTIONAL(associated, MDField, );                                             \
-  OPTIONAL(allocated, MDField, );
+  OPTIONAL(allocated, MDField, );                                              \
+  OPTIONAL(rank, MDSignedOrMDField, );
   PARSE_MD_FIELDS();
 #undef VISIT_MD_FIELDS
+
+  Metadata *Rank = nullptr;
+  if (rank.isMDSignedField())
+    Rank = ConstantAsMetadata::get(ConstantInt::getSigned(
+        Type::getInt64Ty(Context), rank.getMDSignedValue()));
+  else if (rank.isMDField())
+    Rank = rank.getMDFieldValue();
 
   // If this has an identifier try to build an ODR type.
   if (identifier.Val)
@@ -4701,8 +4741,8 @@ bool LLParser::ParseDICompositeType(MDNode *&Result, bool IsDistinct) {
             Context, *identifier.Val, tag.Val, name.Val, file.Val, line.Val,
             scope.Val, baseType.Val, size.Val, align.Val, offset.Val, flags.Val,
             elements.Val, runtimeLang.Val, vtableHolder.Val, templateParams.Val,
-            discriminator.Val, dataLocation.Val, associated.Val,
-            allocated.Val)) {
+            discriminator.Val, dataLocation.Val, associated.Val, allocated.Val,
+            Rank)) {
       Result = CT;
       return false;
     }
@@ -4714,7 +4754,8 @@ bool LLParser::ParseDICompositeType(MDNode *&Result, bool IsDistinct) {
       (Context, tag.Val, name.Val, file.Val, line.Val, scope.Val, baseType.Val,
        size.Val, align.Val, offset.Val, flags.Val, elements.Val,
        runtimeLang.Val, vtableHolder.Val, templateParams.Val, identifier.Val,
-       discriminator.Val, dataLocation.Val, associated.Val, allocated.Val));
+       discriminator.Val, dataLocation.Val, associated.Val, allocated.Val,
+       Rank));
   return false;
 }
 
@@ -5324,6 +5365,8 @@ bool LLParser::ConvertValIDToValue(Type *Ty, ValID &ID, Value *&V,
     // The lexer has no type info, so builds all half, bfloat, float, and double
     // FP constants as double.  Fix this here.  Long double does not need this.
     if (&ID.APFloatVal.getSemantics() == &APFloat::IEEEdouble()) {
+      // Check for signaling before potentially converting and losing that info.
+      bool IsSNAN = ID.APFloatVal.isSignaling();
       bool Ignored;
       if (Ty->isHalfTy())
         ID.APFloatVal.convert(APFloat::IEEEhalf(), APFloat::rmNearestTiesToEven,
@@ -5334,6 +5377,14 @@ bool LLParser::ConvertValIDToValue(Type *Ty, ValID &ID, Value *&V,
       else if (Ty->isFloatTy())
         ID.APFloatVal.convert(APFloat::IEEEsingle(), APFloat::rmNearestTiesToEven,
                               &Ignored);
+      if (IsSNAN) {
+        // The convert call above may quiet an SNaN, so manufacture another
+        // SNaN. The bitcast works because the payload (significand) parameter
+        // is truncated to fit.
+        APInt Payload = ID.APFloatVal.bitcastToAPInt();
+        ID.APFloatVal = APFloat::getSNaN(ID.APFloatVal.getSemantics(),
+                                         ID.APFloatVal.isNegative(), &Payload);
+      }
     }
     V = ConstantFP::get(Context, ID.APFloatVal);
 
@@ -7395,7 +7446,7 @@ int LLParser::ParseGetElementPtr(Instruction *&Inst, PerFunctionState &PFS) {
   // All vector parameters should have the same vector width.
   ElementCount GEPWidth = BaseType->isVectorTy()
                               ? cast<VectorType>(BaseType)->getElementCount()
-                              : ElementCount(0, false);
+                              : ElementCount::getFixed(0);
 
   while (EatIfPresent(lltok::comma)) {
     if (Lex.getKind() == lltok::MetadataVar) {
@@ -7408,7 +7459,7 @@ int LLParser::ParseGetElementPtr(Instruction *&Inst, PerFunctionState &PFS) {
 
     if (auto *ValVTy = dyn_cast<VectorType>(Val->getType())) {
       ElementCount ValNumEl = ValVTy->getElementCount();
-      if (GEPWidth != ElementCount(0, false) && GEPWidth != ValNumEl)
+      if (GEPWidth != ElementCount::getFixed(0) && GEPWidth != ValNumEl)
         return Error(EltLoc,
           "getelementptr vector index has a wrong number of elements");
       GEPWidth = ValNumEl;
@@ -7786,13 +7837,11 @@ bool LLParser::ParseTypeIdCompatibleVtableEntry(unsigned ID) {
   // Now that the TI vector is finalized, it is safe to save the locations
   // of any forward GV references that need updating later.
   for (auto I : IdToIndexMap) {
+    auto &Infos = ForwardRefValueInfos[I.first];
     for (auto P : I.second) {
       assert(TI[P.first].VTableVI == EmptyVI &&
              "Forward referenced ValueInfo expected to be empty");
-      auto FwdRef = ForwardRefValueInfos.insert(std::make_pair(
-          I.first, std::vector<std::pair<ValueInfo *, LocTy>>()));
-      FwdRef.first->second.push_back(
-          std::make_pair(&TI[P.first].VTableVI, P.second));
+      Infos.emplace_back(&TI[P.first].VTableVI, P.second);
     }
   }
 
@@ -8445,9 +8494,7 @@ bool LLParser::ParseAliasSummary(std::string Name, GlobalValue::GUID GUID,
 
   // Record forward reference if the aliasee is not parsed yet.
   if (AliaseeVI.getRef() == FwdVIRef) {
-    auto FwdRef = ForwardRefAliasees.insert(
-        std::make_pair(GVId, std::vector<std::pair<AliasSummary *, LocTy>>()));
-    FwdRef.first->second.push_back(std::make_pair(AS.get(), Loc));
+    ForwardRefAliasees[GVId].emplace_back(AS.get(), Loc);
   } else {
     auto Summary = Index->findSummaryInModule(AliaseeVI, ModulePath);
     assert(Summary && "Aliasee must be a definition");
@@ -8588,13 +8635,11 @@ bool LLParser::ParseOptionalCalls(std::vector<FunctionSummary::EdgeTy> &Calls) {
   // Now that the Calls vector is finalized, it is safe to save the locations
   // of any forward GV references that need updating later.
   for (auto I : IdToIndexMap) {
+    auto &Infos = ForwardRefValueInfos[I.first];
     for (auto P : I.second) {
       assert(Calls[P.first].first.getRef() == FwdVIRef &&
              "Forward referenced ValueInfo expected to be empty");
-      auto FwdRef = ForwardRefValueInfos.insert(std::make_pair(
-          I.first, std::vector<std::pair<ValueInfo *, LocTy>>()));
-      FwdRef.first->second.push_back(
-          std::make_pair(&Calls[P.first].first, P.second));
+      Infos.emplace_back(&Calls[P.first].first, P.second);
     }
   }
 
@@ -8675,13 +8720,11 @@ bool LLParser::ParseOptionalVTableFuncs(VTableFuncList &VTableFuncs) {
   // Now that the VTableFuncs vector is finalized, it is safe to save the
   // locations of any forward GV references that need updating later.
   for (auto I : IdToIndexMap) {
+    auto &Infos = ForwardRefValueInfos[I.first];
     for (auto P : I.second) {
       assert(VTableFuncs[P.first].FuncVI == EmptyVI &&
              "Forward referenced ValueInfo expected to be empty");
-      auto FwdRef = ForwardRefValueInfos.insert(std::make_pair(
-          I.first, std::vector<std::pair<ValueInfo *, LocTy>>()));
-      FwdRef.first->second.push_back(
-          std::make_pair(&VTableFuncs[P.first].FuncVI, P.second));
+      Infos.emplace_back(&VTableFuncs[P.first].FuncVI, P.second);
     }
   }
 
@@ -8730,7 +8773,8 @@ bool LLParser::ParseParamAccessOffset(ConstantRange &Range) {
 
 /// ParamAccessCall
 ///   := '(' 'callee' ':' GVReference ',' ParamNo ',' ParamAccessOffset ')'
-bool LLParser::ParseParamAccessCall(FunctionSummary::ParamAccess::Call &Call) {
+bool LLParser::ParseParamAccessCall(FunctionSummary::ParamAccess::Call &Call,
+                                    IdLocListType &IdLocList) {
   if (ParseToken(lltok::lparen, "expected '(' here") ||
       ParseToken(lltok::kw_callee, "expected 'callee' here") ||
       ParseToken(lltok::colon, "expected ':' here"))
@@ -8738,10 +8782,12 @@ bool LLParser::ParseParamAccessCall(FunctionSummary::ParamAccess::Call &Call) {
 
   unsigned GVId;
   ValueInfo VI;
+  LocTy Loc = Lex.getLoc();
   if (ParseGVReference(VI, GVId))
     return true;
 
-  Call.Callee = VI.getGUID();
+  Call.Callee = VI;
+  IdLocList.emplace_back(GVId, Loc);
 
   if (ParseToken(lltok::comma, "expected ',' here") ||
       ParseParamNo(Call.ParamNo) ||
@@ -8758,7 +8804,8 @@ bool LLParser::ParseParamAccessCall(FunctionSummary::ParamAccess::Call &Call) {
 /// ParamAccess
 ///   := '(' ParamNo ',' ParamAccessOffset [',' OptionalParamAccessCalls]? ')'
 /// OptionalParamAccessCalls := '(' Call [',' Call]* ')'
-bool LLParser::ParseParamAccess(FunctionSummary::ParamAccess &Param) {
+bool LLParser::ParseParamAccess(FunctionSummary::ParamAccess &Param,
+                                IdLocListType &IdLocList) {
   if (ParseToken(lltok::lparen, "expected '(' here") ||
       ParseParamNo(Param.ParamNo) ||
       ParseToken(lltok::comma, "expected ',' here") ||
@@ -8772,7 +8819,7 @@ bool LLParser::ParseParamAccess(FunctionSummary::ParamAccess &Param) {
       return true;
     do {
       FunctionSummary::ParamAccess::Call Call;
-      if (ParseParamAccessCall(Call))
+      if (ParseParamAccessCall(Call, IdLocList))
         return true;
       Param.Calls.push_back(Call);
     } while (EatIfPresent(lltok::comma));
@@ -8798,15 +8845,32 @@ bool LLParser::ParseOptionalParamAccesses(
       ParseToken(lltok::lparen, "expected '(' here"))
     return true;
 
+  IdLocListType VContexts;
+  size_t CallsNum = 0;
   do {
     FunctionSummary::ParamAccess ParamAccess;
-    if (ParseParamAccess(ParamAccess))
+    if (ParseParamAccess(ParamAccess, VContexts))
       return true;
-    Params.push_back(ParamAccess);
+    CallsNum += ParamAccess.Calls.size();
+    assert(VContexts.size() == CallsNum);
+    Params.emplace_back(std::move(ParamAccess));
   } while (EatIfPresent(lltok::comma));
 
   if (ParseToken(lltok::rparen, "expected ')' here"))
     return true;
+
+  // Now that the Params is finalized, it is safe to save the locations
+  // of any forward GV references that need updating later.
+  IdLocListType::const_iterator ItContext = VContexts.begin();
+  for (auto &PA : Params) {
+    for (auto &C : PA.Calls) {
+      if (C.Callee.getRef() == FwdVIRef)
+        ForwardRefValueInfos[ItContext->first].emplace_back(&C.Callee,
+                                                            ItContext->second);
+      ++ItContext;
+    }
+  }
+  assert(ItContext == VContexts.end());
 
   return false;
 }
@@ -8856,12 +8920,11 @@ bool LLParser::ParseOptionalRefs(std::vector<ValueInfo> &Refs) {
   // Now that the Refs vector is finalized, it is safe to save the locations
   // of any forward GV references that need updating later.
   for (auto I : IdToIndexMap) {
+    auto &Infos = ForwardRefValueInfos[I.first];
     for (auto P : I.second) {
       assert(Refs[P.first].getRef() == FwdVIRef &&
              "Forward referenced ValueInfo expected to be empty");
-      auto FwdRef = ForwardRefValueInfos.insert(std::make_pair(
-          I.first, std::vector<std::pair<ValueInfo *, LocTy>>()));
-      FwdRef.first->second.push_back(std::make_pair(&Refs[P.first], P.second));
+      Infos.emplace_back(&Refs[P.first], P.second);
     }
   }
 
@@ -8951,13 +9014,11 @@ bool LLParser::ParseTypeTests(std::vector<GlobalValue::GUID> &TypeTests) {
   // Now that the TypeTests vector is finalized, it is safe to save the
   // locations of any forward GV references that need updating later.
   for (auto I : IdToIndexMap) {
+    auto &Ids = ForwardRefTypeIds[I.first];
     for (auto P : I.second) {
       assert(TypeTests[P.first] == 0 &&
              "Forward referenced type id GUID expected to be 0");
-      auto FwdRef = ForwardRefTypeIds.insert(std::make_pair(
-          I.first, std::vector<std::pair<GlobalValue::GUID *, LocTy>>()));
-      FwdRef.first->second.push_back(
-          std::make_pair(&TypeTests[P.first], P.second));
+      Ids.emplace_back(&TypeTests[P.first], P.second);
     }
   }
 
@@ -8992,13 +9053,11 @@ bool LLParser::ParseVFuncIdList(
   // Now that the VFuncIdList vector is finalized, it is safe to save the
   // locations of any forward GV references that need updating later.
   for (auto I : IdToIndexMap) {
+    auto &Ids = ForwardRefTypeIds[I.first];
     for (auto P : I.second) {
       assert(VFuncIdList[P.first].GUID == 0 &&
              "Forward referenced type id GUID expected to be 0");
-      auto FwdRef = ForwardRefTypeIds.insert(std::make_pair(
-          I.first, std::vector<std::pair<GlobalValue::GUID *, LocTy>>()));
-      FwdRef.first->second.push_back(
-          std::make_pair(&VFuncIdList[P.first].GUID, P.second));
+      Ids.emplace_back(&VFuncIdList[P.first].GUID, P.second);
     }
   }
 
@@ -9031,13 +9090,11 @@ bool LLParser::ParseConstVCallList(
   // Now that the ConstVCallList vector is finalized, it is safe to save the
   // locations of any forward GV references that need updating later.
   for (auto I : IdToIndexMap) {
+    auto &Ids = ForwardRefTypeIds[I.first];
     for (auto P : I.second) {
       assert(ConstVCallList[P.first].VFunc.GUID == 0 &&
              "Forward referenced type id GUID expected to be 0");
-      auto FwdRef = ForwardRefTypeIds.insert(std::make_pair(
-          I.first, std::vector<std::pair<GlobalValue::GUID *, LocTy>>()));
-      FwdRef.first->second.push_back(
-          std::make_pair(&ConstVCallList[P.first].VFunc.GUID, P.second));
+      Ids.emplace_back(&ConstVCallList[P.first].VFunc.GUID, P.second);
     }
   }
 

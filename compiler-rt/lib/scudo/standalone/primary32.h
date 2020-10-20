@@ -13,6 +13,7 @@
 #include "common.h"
 #include "list.h"
 #include "local_cache.h"
+#include "options.h"
 #include "release.h"
 #include "report.h"
 #include "stats.h"
@@ -86,7 +87,7 @@ public:
       if (Sci->CanRelease)
         Sci->ReleaseInfo.LastReleaseAtNs = Time;
     }
-    setReleaseToOsIntervalMs(ReleaseToOsInterval);
+    setOption(Option::ReleaseInterval, static_cast<sptr>(ReleaseToOsInterval));
   }
   void init(s32 ReleaseToOsInterval) {
     memset(this, 0, sizeof(*this));
@@ -184,13 +185,16 @@ public:
       getStats(Str, I, 0);
   }
 
-  void setReleaseToOsIntervalMs(s32 Interval) {
-    if (Interval >= MaxReleaseToOsIntervalMs) {
-      Interval = MaxReleaseToOsIntervalMs;
-    } else if (Interval <= MinReleaseToOsIntervalMs) {
-      Interval = MinReleaseToOsIntervalMs;
+  bool setOption(Option O, sptr Value) {
+    if (O == Option::ReleaseInterval) {
+      const s32 Interval =
+          Max(Min(static_cast<s32>(Value), MaxReleaseToOsIntervalMs),
+              MinReleaseToOsIntervalMs);
+      atomic_store(&ReleaseToOsIntervalMs, Interval, memory_order_relaxed);
+      return true;
     }
-    atomic_store(&ReleaseToOsIntervalMs, Interval, memory_order_relaxed);
+    // Not supported by the Primary, but not an error either.
+    return true;
   }
 
   uptr releaseToOS() {
@@ -203,7 +207,10 @@ public:
     return TotalReleasedBytes;
   }
 
-  bool useMemoryTagging() { return false; }
+  static bool useMemoryTagging(Options Options) {
+    (void)Options;
+    return false;
+  }
   void disableMemoryTagging() {}
 
   const char *getRegionInfoArrayAddress() const { return nullptr; }
@@ -214,6 +221,8 @@ public:
     (void)Ptr;
     return {};
   }
+
+  AtomicOptions Options;
 
 private:
   static const uptr NumClasses = SizeClassMap::NumClasses;
@@ -423,10 +432,6 @@ private:
                 AvailableChunks, Rss >> 10, Sci->ReleaseInfo.RangesReleased);
   }
 
-  s32 getReleaseToOsIntervalMs() {
-    return atomic_load(&ReleaseToOsIntervalMs, memory_order_relaxed);
-  }
-
   NOINLINE uptr releaseToOSMaybe(SizeClassInfo *Sci, uptr ClassId,
                                  bool Force = false) {
     const uptr BlockSize = getSizeByClassId(ClassId);
@@ -457,7 +462,8 @@ private:
     }
 
     if (!Force) {
-      const s32 IntervalMs = getReleaseToOsIntervalMs();
+      const s32 IntervalMs =
+          atomic_load(&ReleaseToOsIntervalMs, memory_order_relaxed);
       if (IntervalMs < 0)
         return 0;
       if (Sci->ReleaseInfo.LastReleaseAtNs +
@@ -483,12 +489,15 @@ private:
       }
     }
     uptr TotalReleasedBytes = 0;
+    auto SkipRegion = [this, First, ClassId](uptr RegionIndex) {
+      return (PossibleRegions[First + RegionIndex] - 1U) != ClassId;
+    };
     if (First && Last) {
       const uptr Base = First * RegionSize;
       const uptr NumberOfRegions = Last - First + 1U;
       ReleaseRecorder Recorder(Base);
       releaseFreeMemoryToOS(Sci->FreeList, Base, RegionSize, NumberOfRegions,
-                            BlockSize, &Recorder);
+                            BlockSize, &Recorder, SkipRegion);
       if (Recorder.getReleasedRangesCount() > 0) {
         Sci->ReleaseInfo.PushedBlocksAtLastRelease = Sci->Stats.PushedBlocks;
         Sci->ReleaseInfo.RangesReleased += Recorder.getReleasedRangesCount();

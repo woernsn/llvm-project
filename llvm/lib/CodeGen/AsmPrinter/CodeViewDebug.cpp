@@ -126,7 +126,9 @@ static CPUType mapArchToCVCPUType(Triple::ArchType Type) {
   case Triple::ArchType::x86_64:
     return CPUType::X64;
   case Triple::ArchType::thumb:
-    return CPUType::Thumb;
+    // LLVM currently doesn't support Windows CE and so thumb
+    // here is indiscriminately mapped to ARMNT specifically.
+    return CPUType::ARMNT;
   case Triple::ArchType::aarch64:
     return CPUType::ARM64;
   default:
@@ -494,8 +496,7 @@ void CodeViewDebug::recordLocalVariable(LocalVariable &&Var,
 
 static void addLocIfNotPresent(SmallVectorImpl<const DILocation *> &Locs,
                                const DILocation *Loc) {
-  auto B = Locs.begin(), E = Locs.end();
-  if (std::find(B, E, Loc) == E)
+  if (!llvm::is_contained(Locs, Loc))
     Locs.push_back(Loc);
 }
 
@@ -1579,11 +1580,16 @@ TypeIndex CodeViewDebug::lowerTypeArray(const DICompositeType *Ty) {
     assert(Element->getTag() == dwarf::DW_TAG_subrange_type);
 
     const DISubrange *Subrange = cast<DISubrange>(Element);
-    assert(!Subrange->getRawLowerBound() &&
-           "codeview doesn't support subranges with lower bounds");
     int64_t Count = -1;
-    if (auto *CI = Subrange->getCount().dyn_cast<ConstantInt*>())
-      Count = CI->getSExtValue();
+    // Calculate the count if either LowerBound is absent or is zero and
+    // either of Count or UpperBound are constant.
+    auto *LI = Subrange->getLowerBound().dyn_cast<ConstantInt *>();
+    if (!Subrange->getRawLowerBound() || (LI && (LI->getSExtValue() == 0))) {
+      if (auto *CI = Subrange->getCount().dyn_cast<ConstantInt*>())
+        Count = CI->getSExtValue();
+      else if (auto *UI = Subrange->getUpperBound().dyn_cast<ConstantInt*>())
+        Count = UI->getSExtValue() + 1; // LowerBound is zero
+    }
 
     // Forward declarations of arrays without a size and VLAs use a count of -1.
     // Emit a count of zero in these cases to match what MSVC does for arrays

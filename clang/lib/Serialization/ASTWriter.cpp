@@ -1272,6 +1272,7 @@ void ASTWriter::WriteControlBlock(Preprocessor &PP, ASTContext &Context,
   const TargetOptions &TargetOpts = Target.getTargetOpts();
   AddString(TargetOpts.Triple, Record);
   AddString(TargetOpts.CPU, Record);
+  AddString(TargetOpts.TuneCPU, Record);
   AddString(TargetOpts.ABI, Record);
   Record.push_back(TargetOpts.FeaturesAsWritten.size());
   for (unsigned I = 0, N = TargetOpts.FeaturesAsWritten.size(); I != N; ++I) {
@@ -2001,9 +2002,9 @@ void ASTWriter::WriteSourceManagerBlock(SourceManager &SourceMgr,
         // We add one to the size so that we capture the trailing NULL
         // that is required by llvm::MemoryBuffer::getMemBuffer (on
         // the reader side).
-        const llvm::MemoryBuffer *Buffer =
-            Content->getBuffer(PP.getDiagnostics(), PP.getFileManager());
-        StringRef Name = Buffer->getBufferIdentifier();
+        llvm::Optional<llvm::MemoryBufferRef> Buffer =
+            Content->getBufferOrNone(PP.getDiagnostics(), PP.getFileManager());
+        StringRef Name = Buffer ? Buffer->getBufferIdentifier() : "";
         Stream.EmitRecordWithBlob(SLocBufferAbbrv, Record,
                                   StringRef(Name.data(), Name.size() + 1));
         EmitBlob = true;
@@ -2015,8 +2016,10 @@ void ASTWriter::WriteSourceManagerBlock(SourceManager &SourceMgr,
       if (EmitBlob) {
         // Include the implicit terminating null character in the on-disk buffer
         // if we're writing it uncompressed.
-        const llvm::MemoryBuffer *Buffer =
-            Content->getBuffer(PP.getDiagnostics(), PP.getFileManager());
+        llvm::Optional<llvm::MemoryBufferRef> Buffer =
+            Content->getBufferOrNone(PP.getDiagnostics(), PP.getFileManager());
+        if (!Buffer)
+          Buffer = llvm::MemoryBufferRef("<<<INVALID BUFFER>>>", "");
         StringRef Blob(Buffer->getBufferStart(), Buffer->getBufferSize() + 1);
         emitBlob(Stream, Blob, SLocBufferBlobCompressedAbbrv,
                  SLocBufferBlobAbbrv);
@@ -3274,9 +3277,8 @@ class ASTIdentifierTableTrait {
   /// doesn't check whether the name has macros defined; use PublicMacroIterator
   /// to check that.
   bool isInterestingIdentifier(const IdentifierInfo *II, uint64_t MacroOffset) {
-    if (MacroOffset ||
-        II->isPoisoned() ||
-        (IsModule ? II->hasRevertedBuiltin() : II->getObjCOrBuiltinID()) ||
+    if (MacroOffset || II->isPoisoned() ||
+        (!IsModule && II->getObjCOrBuiltinID()) ||
         II->hasRevertedTokenIDToIdentifier() ||
         (NeedDecls && II->getFETokenInfo()))
       return true;
@@ -3383,7 +3385,6 @@ public:
     Bits = (Bits << 1) | unsigned(HadMacroDefinition);
     Bits = (Bits << 1) | unsigned(II->isExtensionToken());
     Bits = (Bits << 1) | unsigned(II->isPoisoned());
-    Bits = (Bits << 1) | unsigned(II->hasRevertedBuiltin());
     Bits = (Bits << 1) | unsigned(II->hasRevertedTokenIDToIdentifier());
     Bits = (Bits << 1) | unsigned(II->isCPlusPlusOperatorKeyword());
     LE.write<uint16_t>(Bits);
@@ -4178,11 +4179,11 @@ void ASTWriter::WriteFloatControlPragmaOptions(Sema &SemaRef) {
     return;
 
   RecordData Record;
-  Record.push_back(SemaRef.FpPragmaStack.CurrentValue);
+  Record.push_back(SemaRef.FpPragmaStack.CurrentValue.getAsOpaqueInt());
   AddSourceLocation(SemaRef.FpPragmaStack.CurrentPragmaLocation, Record);
   Record.push_back(SemaRef.FpPragmaStack.Stack.size());
   for (const auto &StackEntry : SemaRef.FpPragmaStack.Stack) {
-    Record.push_back(StackEntry.Value);
+    Record.push_back(StackEntry.Value.getAsOpaqueInt());
     AddSourceLocation(StackEntry.PragmaLocation, Record);
     AddSourceLocation(StackEntry.PragmaPushLocation, Record);
     AddString(StackEntry.StackSlotLabel, Record);
@@ -4979,13 +4980,7 @@ void ASTWriter::WriteDeclUpdatesBlocks(RecordDataImpl &OffsetsRecord) {
         const VarDecl *VD = cast<VarDecl>(D);
         Record.push_back(VD->isInline());
         Record.push_back(VD->isInlineSpecified());
-        if (VD->getInit()) {
-          Record.push_back(!VD->isInitKnownICE() ? 1
-                                                 : (VD->isInitICE() ? 3 : 2));
-          Record.AddStmt(const_cast<Expr*>(VD->getInit()));
-        } else {
-          Record.push_back(0);
-        }
+        Record.AddVarDeclInit(VD);
         break;
       }
 
@@ -5127,7 +5122,7 @@ void ASTRecordWriter::AddAPFloat(const llvm::APFloat &Value) {
 }
 
 static void WriteFixedPointSemantics(ASTRecordWriter &Record,
-                                     FixedPointSemantics FPSema) {
+                                     llvm::FixedPointSemantics FPSema) {
   Record.push_back(FPSema.getWidth());
   Record.push_back(FPSema.getScale());
   Record.push_back(FPSema.isSigned() | FPSema.isSaturated() << 1 |
@@ -5743,6 +5738,23 @@ void ASTRecordWriter::AddCXXDefinitionData(const CXXRecordDecl *D) {
       }
     }
   }
+}
+
+void ASTRecordWriter::AddVarDeclInit(const VarDecl *VD) {
+  const Expr *Init = VD->getInit();
+  if (!Init) {
+    push_back(0);
+    return;
+  }
+
+  unsigned Val = 1;
+  if (EvaluatedStmt *ES = VD->getEvaluatedStmt()) {
+    Val |= (ES->HasConstantInitialization ? 2 : 0);
+    Val |= (ES->HasConstantDestruction ? 4 : 0);
+    // FIXME: Also emit the constant initializer value.
+  }
+  push_back(Val);
+  writeStmtRef(Init);
 }
 
 void ASTWriter::ReaderInitialized(ASTReader *Reader) {
@@ -6581,8 +6593,13 @@ void OMPClauseWriter::VisitOMPToClause(OMPToClause *C) {
   Record.push_back(C->getTotalComponentListNum());
   Record.push_back(C->getTotalComponentsNum());
   Record.AddSourceLocation(C->getLParenLoc());
+  for (unsigned I = 0; I < NumberOfOMPMotionModifiers; ++I) {
+    Record.push_back(C->getMotionModifier(I));
+    Record.AddSourceLocation(C->getMotionModifierLoc(I));
+  }
   Record.AddNestedNameSpecifierLoc(C->getMapperQualifierLoc());
   Record.AddDeclarationNameInfo(C->getMapperIdInfo());
+  Record.AddSourceLocation(C->getColonLoc());
   for (auto *E : C->varlists())
     Record.AddStmt(E);
   for (auto *E : C->mapperlists())
@@ -6605,8 +6622,13 @@ void OMPClauseWriter::VisitOMPFromClause(OMPFromClause *C) {
   Record.push_back(C->getTotalComponentListNum());
   Record.push_back(C->getTotalComponentsNum());
   Record.AddSourceLocation(C->getLParenLoc());
+  for (unsigned I = 0; I < NumberOfOMPMotionModifiers; ++I) {
+    Record.push_back(C->getMotionModifier(I));
+    Record.AddSourceLocation(C->getMotionModifierLoc(I));
+  }
   Record.AddNestedNameSpecifierLoc(C->getMapperQualifierLoc());
   Record.AddDeclarationNameInfo(C->getMapperIdInfo());
+  Record.AddSourceLocation(C->getColonLoc());
   for (auto *E : C->varlists())
     Record.AddStmt(E);
   for (auto *E : C->mapperlists())
@@ -6770,4 +6792,18 @@ void ASTRecordWriter::writeOMPTraitInfo(const OMPTraitInfo *TI) {
         writeEnum(Property.Kind);
     }
   }
+}
+
+void ASTRecordWriter::writeOMPChildren(OMPChildren *Data) {
+  if (!Data)
+    return;
+  writeUInt32(Data->getNumClauses());
+  writeUInt32(Data->getNumChildren());
+  writeBool(Data->hasAssociatedStmt());
+  for (unsigned I = 0, E = Data->getNumClauses(); I < E; ++I)
+    writeOMPClause(Data->getClauses()[I]);
+  if (Data->hasAssociatedStmt())
+    AddStmt(Data->getAssociatedStmt());
+  for (unsigned I = 0, E = Data->getNumChildren(); I < E; ++I)
+    AddStmt(Data->getChildren()[I]);
 }

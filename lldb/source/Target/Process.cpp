@@ -278,6 +278,12 @@ std::chrono::seconds ProcessProperties::GetUtilityExpressionTimeout() const {
   return std::chrono::seconds(value);
 }
 
+bool ProcessProperties::GetSteppingRunsAllThreads() const {
+  const uint32_t idx = ePropertySteppingRunsAllThreads;
+  return m_collection_sp->GetPropertyAtIndexAsBoolean(
+      nullptr, idx, g_process_properties[idx].default_uint_value != 0);
+}
+
 bool ProcessProperties::GetOSPluginReportsAllThreads() const {
   const bool fail_value = true;
   const Property *exp_property =
@@ -2291,6 +2297,9 @@ size_t Process::WriteMemory(addr_t addr, const void *buf, size_t size,
     if (error.Fail())
       return;
 
+    if (bp->GetType() != BreakpointSite::eSoftware)
+      return;
+
     addr_t intersect_addr;
     size_t intersect_size;
     size_t opcode_offset;
@@ -4169,8 +4178,7 @@ void Process::ProcessEventData::DoOnRemoval(Event *event_ptr) {
       // public (or SyncResume) broadcasters.  StopHooks are just for
       // real public stops.  They might also restart the target,
       // so watch for that.
-      process_sp->GetTarget().RunStopHooks();
-      if (process_sp->GetPrivateState() == eStateRunning)
+      if (process_sp->GetTarget().RunStopHooks())
         SetRestarted(true);
     }
   }
@@ -5944,10 +5952,8 @@ Process::AdvanceAddressToNextBranchInstruction(Address default_stop_addr,
     return retval;
   }
 
-  uint32_t branch_index =
-      insn_list->GetIndexOfNextBranchInstruction(insn_offset, target,
-                                                 false /* ignore_calls*/,
-                                                 nullptr);
+  uint32_t branch_index = insn_list->GetIndexOfNextBranchInstruction(
+      insn_offset, false /* ignore_calls*/, nullptr);
   if (branch_index == UINT32_MAX) {
     return retval;
   }

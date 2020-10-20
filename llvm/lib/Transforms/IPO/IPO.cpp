@@ -35,12 +35,11 @@ void llvm::initializeIPO(PassRegistry &Registry) {
   initializeGlobalOptLegacyPassPass(Registry);
   initializeGlobalSplitPass(Registry);
   initializeHotColdSplittingLegacyPassPass(Registry);
-  initializeIPCPPass(Registry);
   initializeAlwaysInlinerLegacyPassPass(Registry);
   initializeSimpleInlinerPass(Registry);
   initializeInferFunctionAttrsLegacyPassPass(Registry);
   initializeInternalizeLegacyPassPass(Registry);
-  initializeLoopExtractorPass(Registry);
+  initializeLoopExtractorLegacyPassPass(Registry);
   initializeBlockExtractorPass(Registry);
   initializeSingleLoopExtractorPass(Registry);
   initializeLowerTypeTestsPass(Registry);
@@ -102,10 +101,6 @@ void LLVMAddGlobalDCEPass(LLVMPassManagerRef PM) {
 
 void LLVMAddGlobalOptimizerPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createGlobalOptimizerPass());
-}
-
-void LLVMAddIPConstantPropagationPass(LLVMPassManagerRef PM) {
-  unwrap(PM)->add(createIPConstantPropagationPass());
 }
 
 void LLVMAddPruneEHPass(LLVMPassManagerRef PM) {

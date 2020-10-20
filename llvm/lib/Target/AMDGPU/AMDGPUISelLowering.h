@@ -90,7 +90,6 @@ protected:
   SDValue performMulCombine(SDNode *N, DAGCombinerInfo &DCI) const;
   SDValue performMulhsCombine(SDNode *N, DAGCombinerInfo &DCI) const;
   SDValue performMulhuCombine(SDNode *N, DAGCombinerInfo &DCI) const;
-  SDValue performMulLoHi24Combine(SDNode *N, DAGCombinerInfo &DCI) const;
   SDValue performCtlz_CttzCombine(const SDLoc &SL, SDValue Cond, SDValue LHS,
                              SDValue RHS, DAGCombinerInfo &DCI) const;
   SDValue performSelectCombine(SDNode *N, DAGCombinerInfo &DCI) const;
@@ -150,8 +149,8 @@ public:
       return true;
 
     const auto Flags = Op.getNode()->getFlags();
-    if (Flags.isDefined())
-      return Flags.hasNoSignedZeros();
+    if (Flags.hasNoSignedZeros())
+      return true;
 
     return false;
   }
@@ -440,8 +439,6 @@ enum NodeType : unsigned {
   MAD_I24,
   MAD_U64_U32,
   MAD_I64_I32,
-  MUL_LOHI_I24,
-  MUL_LOHI_U24,
   PERM,
   TEXTURE_FETCH,
   R600_EXPORT,
@@ -508,7 +505,6 @@ enum NodeType : unsigned {
   ATOMIC_DEC,
   ATOMIC_LOAD_FMIN,
   ATOMIC_LOAD_FMAX,
-  ATOMIC_LOAD_CSUB,
   BUFFER_LOAD,
   BUFFER_LOAD_UBYTE,
   BUFFER_LOAD_USHORT,
@@ -537,8 +533,6 @@ enum NodeType : unsigned {
   BUFFER_ATOMIC_CMPSWAP,
   BUFFER_ATOMIC_CSUB,
   BUFFER_ATOMIC_FADD,
-  BUFFER_ATOMIC_PK_FADD,
-  ATOMIC_PK_FADD,
 
   LAST_AMDGPU_ISD_NUMBER
 };

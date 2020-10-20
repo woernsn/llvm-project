@@ -78,6 +78,7 @@ class GCNTTIImpl final : public BasicTTIImplBase<GCNTTIImpl> {
   AMDGPUTTIImpl CommonTTI;
   bool IsGraphicsShader;
   bool HasFP32Denormals;
+  bool HasFP64FP16Denormals;
   unsigned MaxVGPRs;
 
   const FeatureBitset InlineFeatureIgnoreList = {
@@ -89,6 +90,7 @@ class GCNTTIImpl final : public BasicTTIImplBase<GCNTTIImpl> {
     AMDGPU::FeaturePromoteAlloca,
     AMDGPU::FeatureUnalignedBufferAccess,
     AMDGPU::FeatureUnalignedScratchAccess,
+    AMDGPU::FeatureUnalignedAccessMode,
 
     AMDGPU::FeatureAutoWaitcntBeforeBarrier,
 
@@ -96,7 +98,6 @@ class GCNTTIImpl final : public BasicTTIImplBase<GCNTTIImpl> {
     AMDGPU::FeatureSGPRInitBug,
     AMDGPU::FeatureXNACK,
     AMDGPU::FeatureTrapHandler,
-    AMDGPU::FeatureCodeObjectV3,
 
     // The default assumption needs to be ecc is enabled, but no directly
     // exposed operations depend on it, so it can be safely inlined.
@@ -133,16 +134,18 @@ class GCNTTIImpl final : public BasicTTIImplBase<GCNTTIImpl> {
 
 public:
   explicit GCNTTIImpl(const AMDGPUTargetMachine *TM, const Function &F)
-    : BaseT(TM, F.getParent()->getDataLayout()),
-      ST(static_cast<const GCNSubtarget*>(TM->getSubtargetImpl(F))),
-      TLI(ST->getTargetLowering()),
-      CommonTTI(TM, F),
-      IsGraphicsShader(AMDGPU::isShader(F.getCallingConv())),
-      HasFP32Denormals(AMDGPU::SIModeRegisterDefaults(F).allFP32Denormals()),
-      MaxVGPRs(ST->getMaxNumVGPRs(
-          std::max(ST->getWavesPerEU(F).first,
-                   ST->getWavesPerEUForWorkGroup(
-                       ST->getFlatWorkGroupSizes(F).second)))) {}
+      : BaseT(TM, F.getParent()->getDataLayout()),
+        ST(static_cast<const GCNSubtarget *>(TM->getSubtargetImpl(F))),
+        TLI(ST->getTargetLowering()), CommonTTI(TM, F),
+        IsGraphicsShader(AMDGPU::isShader(F.getCallingConv())),
+        MaxVGPRs(ST->getMaxNumVGPRs(
+            std::max(ST->getWavesPerEU(F).first,
+                     ST->getWavesPerEUForWorkGroup(
+                         ST->getFlatWorkGroupSizes(F).second)))) {
+    AMDGPU::SIModeRegisterDefaults Mode(F);
+    HasFP32Denormals = Mode.allFP32Denormals();
+    HasFP64FP16Denormals = Mode.allFP64FP16Denormals();
+  }
 
   bool hasBranchDivergence() { return true; }
   bool useGPUDivergenceAnalysis() const;

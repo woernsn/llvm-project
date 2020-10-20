@@ -606,6 +606,10 @@ public:
       return LangAS::opencl_constant;
     case ParsedAttr::AT_OpenCLGlobalAddressSpace:
       return LangAS::opencl_global;
+    case ParsedAttr::AT_OpenCLGlobalDeviceAddressSpace:
+      return LangAS::opencl_global_device;
+    case ParsedAttr::AT_OpenCLGlobalHostAddressSpace:
+      return LangAS::opencl_global_host;
     case ParsedAttr::AT_OpenCLLocalAddressSpace:
       return LangAS::opencl_local;
     case ParsedAttr::AT_OpenCLPrivateAddressSpace:
@@ -1040,32 +1044,18 @@ enum AttributeDeclKind {
   ExpectedFunctionWithProtoType,
 };
 
-inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
-                                           const ParsedAttr &At) {
+inline const StreamingDiagnostic &operator<<(const StreamingDiagnostic &DB,
+                                             const ParsedAttr &At) {
   DB.AddTaggedVal(reinterpret_cast<intptr_t>(At.getAttrName()),
                   DiagnosticsEngine::ak_identifierinfo);
   return DB;
 }
 
-inline const PartialDiagnostic &operator<<(const PartialDiagnostic &PD,
-                                           const ParsedAttr &At) {
-  PD.AddTaggedVal(reinterpret_cast<intptr_t>(At.getAttrName()),
-                  DiagnosticsEngine::ak_identifierinfo);
-  return PD;
-}
-
-inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
-                                           const ParsedAttr *At) {
+inline const StreamingDiagnostic &operator<<(const StreamingDiagnostic &DB,
+                                             const ParsedAttr *At) {
   DB.AddTaggedVal(reinterpret_cast<intptr_t>(At->getAttrName()),
                   DiagnosticsEngine::ak_identifierinfo);
   return DB;
-}
-
-inline const PartialDiagnostic &operator<<(const PartialDiagnostic &PD,
-                                           const ParsedAttr *At) {
-  PD.AddTaggedVal(reinterpret_cast<intptr_t>(At->getAttrName()),
-                  DiagnosticsEngine::ak_identifierinfo);
-  return PD;
 }
 
 } // namespace clang

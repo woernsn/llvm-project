@@ -686,6 +686,18 @@ func @fold_rank() -> (index) {
 
 // -----
 
+// CHECK-LABEL: func @fold_rank_memref
+func @fold_rank_memref(%arg0 : memref<?x?xf32>) -> (index) {
+  // Fold a rank into a constant
+  // CHECK-NEXT: [[C2:%.+]] = constant 2 : index
+  %rank_0 = rank %arg0 : memref<?x?xf32>
+
+  // CHECK-NEXT: return [[C2]]
+  return %rank_0 : index
+}
+
+// -----
+
 // CHECK-LABEL: func @nested_isolated_region
 func @nested_isolated_region() {
   // CHECK-NEXT: func @isolated_op
@@ -731,4 +743,13 @@ func @splat_fold() -> (vector<4xf32>, tensor<4xf32>) {
   // CHECK-NEXT: [[V:%.*]] = constant dense<1.000000e+00> : vector<4xf32>
   // CHECK-NEXT: [[T:%.*]] = constant dense<1.000000e+00> : tensor<4xf32>
   // CHECK-NEXT: return [[V]], [[T]] : vector<4xf32>, tensor<4xf32>
+}
+
+// -----
+
+// CHECK-LABEL: func @subview_scalar_fold
+func @subview_scalar_fold(%arg0: memref<f32>) -> memref<f32> {
+  // CHECK-NOT: subview
+  %c = subview %arg0[] [] [] : memref<f32> to memref<f32>
+  return %c : memref<f32>
 }

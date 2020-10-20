@@ -1066,8 +1066,9 @@ static IsTupleLike isTupleLike(Sema &S, SourceLocation Loc, QualType T,
     TemplateArgumentListInfo &Args;
     ICEDiagnoser(LookupResult &R, TemplateArgumentListInfo &Args)
         : R(R), Args(Args) {}
-    void diagnoseNotICE(Sema &S, SourceLocation Loc, SourceRange SR) override {
-      S.Diag(Loc, diag::err_decomp_decl_std_tuple_size_not_constant)
+    Sema::SemaDiagnosticBuilder diagnoseNotICE(Sema &S,
+                                               SourceLocation Loc) override {
+      return S.Diag(Loc, diag::err_decomp_decl_std_tuple_size_not_constant)
           << printTemplateArgs(S.Context.getPrintingPolicy(), Args);
     }
   } Diagnoser(R, Args);
@@ -1077,7 +1078,7 @@ static IsTupleLike isTupleLike(Sema &S, SourceLocation Loc, QualType T,
   if (E.isInvalid())
     return IsTupleLike::Error;
 
-  E = S.VerifyIntegerConstantExpression(E.get(), &Size, Diagnoser, false);
+  E = S.VerifyIntegerConstantExpression(E.get(), &Size, Diagnoser);
   if (E.isInvalid())
     return IsTupleLike::Error;
 
@@ -1184,7 +1185,8 @@ static bool checkTupleLikeDecomposition(Sema &S,
     //   an xvalue otherwise
     if (!Src->getType()->isLValueReferenceType())
       E = ImplicitCastExpr::Create(S.Context, E.get()->getType(), CK_NoOp,
-                                   E.get(), nullptr, VK_XValue);
+                                   E.get(), nullptr, VK_XValue,
+                                   FPOptionsOverride());
 
     TemplateArgumentListInfo Args(Loc, Loc);
     Args.addArgument(
@@ -1248,8 +1250,7 @@ static bool checkTupleLikeDecomposition(Sema &S,
     if (E.isInvalid())
       return true;
     RefVD->setInit(E.get());
-    if (!E.get()->isValueDependent())
-      RefVD->checkInitIsICE();
+    S.CheckCompleteVariableDeclaration(RefVD);
 
     E = S.BuildDeclarationNameExpr(CXXScopeSpec(),
                                    DeclarationNameInfo(B->getDeclName(), Loc),
@@ -3577,8 +3578,10 @@ namespace {
         Base = SubME->getBase();
       }
 
-      if (!isa<CXXThisExpr>(Base->IgnoreParenImpCasts()))
+      if (!isa<CXXThisExpr>(Base->IgnoreParenImpCasts())) {
+        Visit(Base);
         return;
+      }
 
       if (AddressOf && AllPODFields)
         return;
@@ -6056,7 +6059,8 @@ void Sema::checkClassLevelDLLAttribute(CXXRecordDecl *Class) {
   Attr *ClassAttr = getDLLAttr(Class);
 
   // MSVC inherits DLL attributes to partial class template specializations.
-  if (Context.getTargetInfo().getCXXABI().isMicrosoft() && !ClassAttr) {
+  if ((Context.getTargetInfo().getCXXABI().isMicrosoft() || 
+       Context.getTargetInfo().getTriple().isWindowsItaniumEnvironment()) && !ClassAttr) {
     if (auto *Spec = dyn_cast<ClassTemplatePartialSpecializationDecl>(Class)) {
       if (Attr *TemplateAttr =
               getDLLAttr(Spec->getSpecializedTemplate()->getTemplatedDecl())) {
@@ -6076,7 +6080,8 @@ void Sema::checkClassLevelDLLAttribute(CXXRecordDecl *Class) {
     return;
   }
 
-  if (Context.getTargetInfo().getCXXABI().isMicrosoft() &&
+  if ((Context.getTargetInfo().getCXXABI().isMicrosoft() || 
+       Context.getTargetInfo().getTriple().isWindowsItaniumEnvironment()) &&
       !ClassAttr->isInherited()) {
     // Diagnose dll attributes on members of class with dll attribute.
     for (Decl *Member : Class->decls()) {
@@ -8022,10 +8027,10 @@ private:
     if (ReturnFalse.isInvalid())
       return StmtError();
 
-    return S.ActOnIfStmt(Loc, false, nullptr,
+    return S.ActOnIfStmt(Loc, false, Loc, nullptr,
                          S.ActOnCondition(nullptr, Loc, NotCond.get(),
                                           Sema::ConditionKind::Boolean),
-                         ReturnFalse.get(), SourceLocation(), nullptr);
+                         Loc, ReturnFalse.get(), SourceLocation(), nullptr);
   }
 
   StmtResult visitSubobjectArray(QualType Type, llvm::APInt Size,
@@ -8177,9 +8182,9 @@ private:
         return StmtError();
 
       // if (...)
-      return S.ActOnIfStmt(Loc, /*IsConstexpr=*/false, InitStmt, Cond,
-                           ReturnStmt.get(), /*ElseLoc=*/SourceLocation(),
-                           /*Else=*/nullptr);
+      return S.ActOnIfStmt(Loc, /*IsConstexpr=*/false, Loc, InitStmt, Cond, Loc,
+                           ReturnStmt.get(),
+                           /*ElseLoc=*/SourceLocation(), /*Else=*/nullptr);
     }
 
     case DefaultedComparisonKind::NotEqual:
@@ -8212,7 +8217,7 @@ static void lookupOperatorsForDefaultedComparison(Sema &Self, Scope *S,
                                                   UnresolvedSetImpl &Operators,
                                                   OverloadedOperatorKind Op) {
   auto Lookup = [&](OverloadedOperatorKind OO) {
-    Self.LookupOverloadedOperatorName(OO, S, QualType(), QualType(), Operators);
+    Self.LookupOverloadedOperatorName(OO, S, Operators);
   };
 
   // Every defaulted operator looks up itself.
@@ -9399,7 +9404,8 @@ static bool checkTrivialClassMembers(Sema &S, CXXRecordDecl *RD,
     //       brace-or-equal-initializer
     if (CSM == Sema::CXXDefaultConstructor && FI->hasInClassInitializer()) {
       if (Diagnose)
-        S.Diag(FI->getLocation(), diag::note_nontrivial_in_class_init) << FI;
+        S.Diag(FI->getLocation(), diag::note_nontrivial_default_member_init)
+            << FI;
       return false;
     }
 
@@ -11106,8 +11112,8 @@ QualType Sema::CheckComparisonCategoryType(ComparisonCategoryType Kind,
     // Attempt to diagnose reasons why the STL definition of this type
     // might be foobar, including it failing to be a constant expression.
     // TODO Handle more ways the lookup or result can be invalid.
-    if (!VD->isStaticDataMember() || !VD->isConstexpr() || !VD->hasInit() ||
-        !VD->checkInitIsICE())
+    if (!VD->isStaticDataMember() ||
+        !VD->isUsableInConstantExpressions(Context))
       return UnsupportedSTLError(USS_InvalidMember, MemName, VD);
 
     // Attempt to evaluate the var decl as a constant expression and extract
@@ -14866,9 +14872,9 @@ void Sema::DefineImplicitLambdaToBlockPointerConversion(
   // (since it's unusable otherwise); in the case where we inline the
   // block literal, it has block literal lifetime semantics.
   if (!BuildBlock.isInvalid() && !getLangOpts().ObjCAutoRefCount)
-    BuildBlock = ImplicitCastExpr::Create(Context, BuildBlock.get()->getType(),
-                                          CK_CopyAndAutoreleaseBlockObject,
-                                          BuildBlock.get(), nullptr, VK_RValue);
+    BuildBlock = ImplicitCastExpr::Create(
+        Context, BuildBlock.get()->getType(), CK_CopyAndAutoreleaseBlockObject,
+        BuildBlock.get(), nullptr, VK_RValue, FPOptionsOverride());
 
   if (BuildBlock.isInvalid()) {
     Diag(CurrentLocation, diag::note_lambda_to_block_conv);
@@ -15076,9 +15082,10 @@ ExprResult Sema::BuildCXXDefaultInitExpr(SourceLocation Loc, FieldDecl *Field) {
   // constructor before the initializer is lexically complete will ultimately
   // come here at which point we can diagnose it.
   RecordDecl *OutermostClass = ParentRD->getOuterLexicalRecordContext();
-  Diag(Loc, diag::err_in_class_initializer_not_yet_parsed)
+  Diag(Loc, diag::err_default_member_initializer_not_yet_parsed)
       << OutermostClass << Field;
-  Diag(Field->getEndLoc(), diag::note_in_class_initializer_not_yet_parsed);
+  Diag(Field->getEndLoc(),
+       diag::note_default_member_initializer_not_yet_parsed);
   // Recover by marking the field invalid, unless we're in a SFINAE context.
   if (!isSFINAEContext())
     Field->setInvalidDecl();
@@ -15988,9 +15995,10 @@ Decl *Sema::BuildStaticAssertDeclaration(SourceLocation StaticAssertLoc,
       AssertExpr = FullAssertExpr.get();
 
     llvm::APSInt Cond;
-    if (!Failed && VerifyIntegerConstantExpression(AssertExpr, &Cond,
-          diag::err_static_assert_expression_is_not_constant,
-          /*AllowFold=*/false).isInvalid())
+    if (!Failed && VerifyIntegerConstantExpression(
+                       AssertExpr, &Cond,
+                       diag::err_static_assert_expression_is_not_constant)
+                       .isInvalid())
       Failed = true;
 
     if (!Failed && !Cond) {

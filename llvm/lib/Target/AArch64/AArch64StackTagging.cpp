@@ -73,6 +73,10 @@ static cl::opt<bool>
 static cl::opt<unsigned> ClScanLimit("stack-tagging-merge-init-scan-limit",
                                      cl::init(40), cl::Hidden);
 
+static cl::opt<unsigned>
+    ClMergeInitSizeLimit("stack-tagging-merge-init-size-limit", cl::init(272),
+                         cl::Hidden);
+
 static const Align kTagGranuleSize = Align(16);
 
 namespace {
@@ -434,7 +438,8 @@ void AArch64StackTagging::tagAlloca(AllocaInst *AI, Instruction *InsertBefore,
   bool LittleEndian =
       Triple(AI->getModule()->getTargetTriple()).isLittleEndian();
   // Current implementation of initializer merging assumes little endianness.
-  if (MergeInit && !F->hasOptNone() && LittleEndian) {
+  if (MergeInit && !F->hasOptNone() && LittleEndian &&
+      Size < ClMergeInitSizeLimit) {
     LLVM_DEBUG(dbgs() << "collecting initializers for " << *AI
                       << ", size = " << Size << "\n");
     InsertBefore = collectInitializers(InsertBefore, Ptr, Size, IB);
@@ -544,7 +549,6 @@ bool AArch64StackTagging::runOnFunction(Function &Fn) {
 
   MapVector<AllocaInst *, AllocaInfo> Allocas; // need stable iteration order
   SmallVector<Instruction *, 8> RetVec;
-  DenseMap<Value *, AllocaInst *> AllocaForValue;
   SmallVector<Instruction *, 4> UnrecognizedLifetimes;
 
   for (auto &BB : *F) {
@@ -566,8 +570,7 @@ bool AArch64StackTagging::runOnFunction(Function &Fn) {
       auto *II = dyn_cast<IntrinsicInst>(I);
       if (II && (II->getIntrinsicID() == Intrinsic::lifetime_start ||
                  II->getIntrinsicID() == Intrinsic::lifetime_end)) {
-        AllocaInst *AI =
-            llvm::findAllocaForValue(II->getArgOperand(1), AllocaForValue);
+        AllocaInst *AI = findAllocaForValue(II->getArgOperand(1));
         if (!AI) {
           UnrecognizedLifetimes.push_back(I);
           continue;

@@ -86,6 +86,9 @@ def AssertAPI : PublicAPI<"assert.h"> {
   ];
 }
 
+def CTypeAPI : PublicAPI<"ctype.h"> {
+}
+
 def MathErrHandlingMacro : MacroDef<"math_errhandling"> {
   let Defn = [{
     #ifndef math_errhandling
@@ -149,77 +152,9 @@ def MathAPI : PublicAPI<"math.h"> {
     DoubleT,
     FloatT,
   ];
-  let Functions = [
-   "copysign",
-   "copysignf",
-   "copysignl",
-   "ceil",
-   "ceilf",
-   "ceill",
-   "cosf",
-   "fabs",
-   "fabsf",
-   "fabsl",
-   "floor",
-   "floorf",
-   "floorl",
-   "fmax",
-   "fmaxf",
-   "fmaxl",
-   "fmin",
-   "fminf",
-   "fminl",
-   "frexp",
-   "frexpf",
-   "frexpl",
-   "logb",
-   "logbf",
-   "logbl",
-   "modf",
-   "modff",
-   "modfl",
-   "expf",
-   "exp2f",
-   "round",
-   "roundf",
-   "roundl",
-   "sincosf",
-   "sinf",
-   "trunc",
-   "truncf",
-   "truncl",
-  ];
 }
 
 def StringAPI : PublicAPI<"string.h"> {
-  let Functions = [
-    "bzero",
-    "memchr",
-    "memcmp",
-    "memcpy",
-    "memmove",
-    "memrchr",
-    "memset",
-    "strcat",
-    "strchr",
-    "strcmp",
-    "strcoll",
-    "strcpy",
-    "strcspn",  
-    "strerror",
-    "strlen",
-    "strncat",
-    "strncmp",
-    "strncpy",
-    "strnlen",
-    "strpbrk",
-    "strrchr",
-    "strspn",
-    "strstr",
-    "strtok",
-    "strxfrm",   
-  ];
-
   let TypeDeclarations = [
     SizeT,
   ];
@@ -234,17 +169,9 @@ def StdIOAPI : PublicAPI<"stdio.h"> {
     SizeT,
     FILE,
   ];
-
-  let Functions = [
-    "fwrite",
-  ];
 }
 
 def StdlibAPI : PublicAPI<"stdlib.h"> {
-  let Functions = [
-    "_Exit",
-    "abort",
-  ];
 }
 
 def ErrnoAPI : PublicAPI<"errno.h"> {
@@ -290,11 +217,6 @@ def SysMManAPI : PublicAPI<"sys/mman.h"> {
     SizeT,
     OffT,
   ];
-
-  let Functions = [
-    "mmap",
-    "munmap",
-  ];
 }
 
 def StructSigactionDefn : TypeDecl<"struct sigaction"> {
@@ -321,17 +243,6 @@ def SignalAPI : PublicAPI<"signal.h"> {
   let TypeDeclarations = [
     StructSigactionDefn,
     SighandlerTDefn,
-  ];
-
-  let Functions = [
-    "raise",
-    "sigaction",
-    "sigdelset",
-    "sigprocmask",
-    "sigemptyset",
-    "sigaddset",
-    "sigfillset",
-    "signal",
   ];
 }
 
@@ -382,24 +293,11 @@ def ThreadsAPI : PublicAPI<"threads.h"> {
     "thrd_error",
     "thrd_nomem",
   ];
-
-  let Functions = [
-    "call_once",
-    "mtx_init",
-    "mtx_lock",
-    "mtx_unlock",
-    "thrd_create",
-    "thrd_join",
-  ];
 }
 
 def UniStdAPI : PublicAPI<"unistd.h"> {
   let TypeDeclarations = [
     SSizeT,
     SizeT,
-  ];
-
-  let Functions = [
-    "write",
   ];
 }

@@ -51,6 +51,7 @@ The following options are describe below:
  - :option:`EnumCase`, :option:`EnumPrefix`, :option:`EnumSuffix`
  - :option:`EnumConstantCase`, :option:`EnumConstantPrefix`, :option:`EnumConstantSuffix`
  - :option:`FunctionCase`, :option:`FunctionPrefix`, :option:`FunctionSuffix`
+ - :option:`GetConfigPerFile`
  - :option:`GlobalConstantCase`, :option:`GlobalConstantPrefix`, :option:`GlobalConstantSuffix`
  - :option:`GlobalConstantPointerCase`, :option:`GlobalConstantPointerPrefix`, :option:`GlobalConstantPointerSuffix`
  - :option:`GlobalFunctionCase`, :option:`GlobalFunctionPrefix`, :option:`GlobalFunctionSuffix`
@@ -75,6 +76,7 @@ The following options are describe below:
  - :option:`ProtectedMethodCase`, :option:`ProtectedMethodPrefix`, :option:`ProtectedMethodSuffix`
  - :option:`PublicMemberCase`, :option:`PublicMemberPrefix`, :option:`PublicMemberSuffix`
  - :option:`PublicMethodCase`, :option:`PublicMethodPrefix`, :option:`PublicMethodSuffix`
+ - :option:`ScopedEnumConstantCase`, :option:`ScopedEnumConstantPrefix`, :option:`ScopedEnumConstantSuffix`
  - :option:`StaticConstantCase`, :option:`StaticConstantPrefix`, :option:`StaticConstantSuffix`
  - :option:`StaticVariableCase`, :option:`StaticVariablePrefix`, :option:`StaticVariableSuffix`
  - :option:`StructCase`, :option:`StructPrefix`, :option:`StructSuffix`
@@ -712,6 +714,13 @@ After:
 .. code-block:: c++
 
     char pre_my_function_string_post();
+
+.. option:: GetConfigPerFile
+
+    When `true` the check will look for the configuration for where an
+    identifier is declared. Useful for when included header files use a 
+    different style. 
+    Default value is `true`.
 
 .. option:: GlobalConstantCase
 
@@ -1586,6 +1595,41 @@ After:
     public:
       int pre_member_method_post();
     }
+
+.. option:: ScopedEnumConstantCase
+
+    When defined, the check will ensure scoped enum constant names conform to 
+    the selected casing.
+
+.. option:: ScopedEnumConstantPrefix
+
+    When defined, the check will ensure scoped enum constant names will add the
+    prefixed with the given value (regardless of casing).
+
+.. option:: ScopedEnumConstantSuffix
+
+    When defined, the check will ensure scoped enum constant names will add the
+    suffix with the given value (regardless of casing).
+
+For example using values of:
+
+   - ScopedEnumConstantCase of ``lower_case``
+   - ScopedEnumConstantPrefix of ``pre_``
+   - ScopedEnumConstantSuffix of ``_post``
+
+Identifies and/or transforms enumeration constant names as follows:
+
+Before:
+
+.. code-block:: c++
+
+    enum class FOO { One, Two, Three };
+
+After:
+
+.. code-block:: c++
+
+    enum class FOO { pre_One_post, pre_Two_post, pre_Three_post };
 
 .. option:: StaticConstantCase
 

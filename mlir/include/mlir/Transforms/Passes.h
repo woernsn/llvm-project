@@ -14,20 +14,31 @@
 #ifndef MLIR_TRANSFORMS_PASSES_H
 #define MLIR_TRANSFORMS_PASSES_H
 
-#include "mlir/Support/LLVM.h"
-#include <functional>
+#include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/LocationSnapshot.h"
+#include "mlir/Transforms/ViewOpGraph.h"
+#include "mlir/Transforms/ViewRegionGraph.h"
 #include <limits>
 
 namespace mlir {
 
 class AffineForOp;
-class FuncOp;
-class ModuleOp;
-class Pass;
-template <typename T> class OperationPass;
 
-/// Creates an instance of the BufferPlacement pass.
-std::unique_ptr<Pass> createBufferPlacementPass();
+//===----------------------------------------------------------------------===//
+// Passes
+//===----------------------------------------------------------------------===//
+
+/// Creates an instance of the BufferDeallocation pass to free all allocated
+/// buffers.
+std::unique_ptr<Pass> createBufferDeallocationPass();
+
+/// Creates a pass that moves allocations upwards to reduce the number of
+/// required copies that are inserted during the BufferDeallocation pass.
+std::unique_ptr<Pass> createBufferHoistingPass();
+
+/// Creates a pass that moves allocations upwards out of loops. This avoids
+/// reallocations inside of loops.
+std::unique_ptr<Pass> createBufferLoopHoistingPass();
 
 /// Creates an instance of the Canonicalizer pass.
 std::unique_ptr<Pass> createCanonicalizerPass();
@@ -89,6 +100,19 @@ std::unique_ptr<Pass> createSCCPPass();
 /// Creates a pass which delete symbol operations that are unreachable. This
 /// pass may *only* be scheduled on an operation that defines a SymbolTable.
 std::unique_ptr<Pass> createSymbolDCEPass();
+
+/// Creates an interprocedural pass to normalize memrefs to have a trivial
+/// (identity) layout map.
+std::unique_ptr<OperationPass<ModuleOp>> createNormalizeMemRefsPass();
+
+//===----------------------------------------------------------------------===//
+// Registration
+//===----------------------------------------------------------------------===//
+
+/// Generate the code for registering passes.
+#define GEN_PASS_REGISTRATION
+#include "mlir/Transforms/Passes.h.inc"
+
 } // end namespace mlir
 
 #endif // MLIR_TRANSFORMS_PASSES_H

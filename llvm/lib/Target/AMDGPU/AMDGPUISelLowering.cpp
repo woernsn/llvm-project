@@ -320,6 +320,7 @@ AMDGPUTargetLowering::AMDGPUTargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::FNEARBYINT, MVT::f32, Custom);
   setOperationAction(ISD::FNEARBYINT, MVT::f64, Custom);
 
+  setOperationAction(ISD::FREM, MVT::f16, Custom);
   setOperationAction(ISD::FREM, MVT::f32, Custom);
   setOperationAction(ISD::FREM, MVT::f64, Custom);
 
@@ -598,6 +599,7 @@ static bool fnegFoldsIntoOp(unsigned Opc) {
   case AMDGPUISD::FMIN_LEGACY:
   case AMDGPUISD::FMAX_LEGACY:
   case AMDGPUISD::FMED3:
+    // TODO: handle llvm.amdgcn.fma.legacy
     return true;
   default:
     return false;
@@ -781,34 +783,27 @@ bool AMDGPUTargetLowering::isCheapToSpeculateCtlz() const {
   return true;
 }
 
-bool AMDGPUTargetLowering::isSDNodeAlwaysUniform(const SDNode * N) const {
+bool AMDGPUTargetLowering::isSDNodeAlwaysUniform(const SDNode *N) const {
   switch (N->getOpcode()) {
-    default:
-    return false;
-    case ISD::EntryToken:
-    case ISD::TokenFactor:
+  case ISD::EntryToken:
+  case ISD::TokenFactor:
+    return true;
+  case ISD::INTRINSIC_WO_CHAIN: {
+    unsigned IntrID = cast<ConstantSDNode>(N->getOperand(0))->getZExtValue();
+    switch (IntrID) {
+    case Intrinsic::amdgcn_readfirstlane:
+    case Intrinsic::amdgcn_readlane:
       return true;
-    case ISD::INTRINSIC_WO_CHAIN:
-    {
-      unsigned IntrID = cast<ConstantSDNode>(N->getOperand(0))->getZExtValue();
-      switch (IntrID) {
-        default:
-        return false;
-        case Intrinsic::amdgcn_readfirstlane:
-        case Intrinsic::amdgcn_readlane:
-          return true;
-      }
     }
-    break;
-    case ISD::LOAD:
-    {
-      if (cast<LoadSDNode>(N)->getMemOperand()->getAddrSpace() ==
-          AMDGPUAS::CONSTANT_ADDRESS_32BIT)
-        return true;
-      return false;
-    }
-    break;
+    return false;
   }
+  case ISD::LOAD:
+    if (cast<LoadSDNode>(N)->getMemOperand()->getAddrSpace() ==
+        AMDGPUAS::CONSTANT_ADDRESS_32BIT)
+      return true;
+    return false;
+  }
+  return false;
 }
 
 SDValue AMDGPUTargetLowering::getNegatedExpression(
@@ -1543,7 +1538,7 @@ SDValue AMDGPUTargetLowering::SplitVectorLoad(const SDValue Op,
   SDValue LoLoad = DAG.getExtLoad(Load->getExtensionType(), SL, LoVT,
                                   Load->getChain(), BasePtr, SrcValue, LoMemVT,
                                   BaseAlign, Load->getMemOperand()->getFlags());
-  SDValue HiPtr = DAG.getObjectPtrOffset(SL, BasePtr, Size);
+  SDValue HiPtr = DAG.getObjectPtrOffset(SL, BasePtr, TypeSize::Fixed(Size));
   SDValue HiLoad =
       DAG.getExtLoad(Load->getExtensionType(), SL, HiVT, Load->getChain(),
                      HiPtr, SrcValue.getWithOffset(LoMemVT.getStoreSize()),
@@ -2079,20 +2074,19 @@ SDValue AMDGPUTargetLowering::LowerSDIVREM(SDValue Op,
   return DAG.getMergeValues(Res, DL);
 }
 
-// (frem x, y) -> (fsub x, (fmul (ftrunc (fdiv x, y)), y))
+// (frem x, y) -> (fma (fneg (ftrunc (fdiv x, y))), y, x)
 SDValue AMDGPUTargetLowering::LowerFREM(SDValue Op, SelectionDAG &DAG) const {
   SDLoc SL(Op);
   EVT VT = Op.getValueType();
+  auto Flags = Op->getFlags();
   SDValue X = Op.getOperand(0);
   SDValue Y = Op.getOperand(1);
 
-  // TODO: Should this propagate fast-math-flags?
-
-  SDValue Div = DAG.getNode(ISD::FDIV, SL, VT, X, Y);
-  SDValue Floor = DAG.getNode(ISD::FTRUNC, SL, VT, Div);
-  SDValue Mul = DAG.getNode(ISD::FMUL, SL, VT, Floor, Y);
-
-  return DAG.getNode(ISD::FSUB, SL, VT, X, Mul);
+  SDValue Div = DAG.getNode(ISD::FDIV, SL, VT, X, Y, Flags);
+  SDValue Trunc = DAG.getNode(ISD::FTRUNC, SL, VT, Div, Flags);
+  SDValue Neg = DAG.getNode(ISD::FNEG, SL, VT, Trunc, Flags);
+  // TODO: For f32 use FMAD instead if !hasFastFMA32?
+  return DAG.getNode(ISD::FMA, SL, VT, Neg, Y, X, Flags);
 }
 
 SDValue AMDGPUTargetLowering::LowerFCEIL(SDValue Op, SelectionDAG &DAG) const {
@@ -3204,7 +3198,7 @@ SDValue AMDGPUTargetLowering::performTruncateCombine(
     if (Vec.getOpcode() == ISD::BUILD_VECTOR) {
       SDValue Elt0 = Vec.getOperand(0);
       EVT EltVT = Elt0.getValueType();
-      if (VT.getSizeInBits() <= EltVT.getSizeInBits()) {
+      if (VT.getFixedSizeInBits() <= EltVT.getFixedSizeInBits()) {
         if (EltVT.isFloatingPoint()) {
           Elt0 = DAG.getNode(ISD::BITCAST, SL,
                              EltVT.changeTypeToInteger(), Elt0);
@@ -3287,17 +3281,13 @@ static SDValue getMul24(SelectionDAG &DAG, const SDLoc &SL,
     return DAG.getNode(MulOpc, SL, MVT::i32, N0, N1);
   }
 
-  // Because we want to eliminate extension instructions before the
-  // operation, we need to create a single user here (i.e. not the separate
-  // mul_lo + mul_hi) so that SimplifyDemandedBits will deal with it.
+  unsigned MulLoOpc = Signed ? AMDGPUISD::MUL_I24 : AMDGPUISD::MUL_U24;
+  unsigned MulHiOpc = Signed ? AMDGPUISD::MULHI_I24 : AMDGPUISD::MULHI_U24;
 
-  unsigned MulOpc = Signed ? AMDGPUISD::MUL_LOHI_I24 : AMDGPUISD::MUL_LOHI_U24;
+  SDValue MulLo = DAG.getNode(MulLoOpc, SL, MVT::i32, N0, N1);
+  SDValue MulHi = DAG.getNode(MulHiOpc, SL, MVT::i32, N0, N1);
 
-  SDValue Mul = DAG.getNode(MulOpc, SL,
-                            DAG.getVTList(MVT::i32, MVT::i32), N0, N1);
-
-  return DAG.getNode(ISD::BUILD_PAIR, SL, MVT::i64,
-                     Mul.getValue(0), Mul.getValue(1));
+  return DAG.getNode(ISD::BUILD_PAIR, SL, MVT::i64, MulLo, MulHi);
 }
 
 SDValue AMDGPUTargetLowering::performMulCombine(SDNode *N,
@@ -3393,29 +3383,6 @@ SDValue AMDGPUTargetLowering::performMulhuCombine(SDNode *N,
   SDValue Mulhi = DAG.getNode(AMDGPUISD::MULHI_U24, DL, MVT::i32, N0, N1);
   DCI.AddToWorklist(Mulhi.getNode());
   return DAG.getZExtOrTrunc(Mulhi, DL, VT);
-}
-
-SDValue AMDGPUTargetLowering::performMulLoHi24Combine(
-  SDNode *N, DAGCombinerInfo &DCI) const {
-  SelectionDAG &DAG = DCI.DAG;
-
-  // Simplify demanded bits before splitting into multiple users.
-  if (SDValue V = simplifyI24(N, DCI))
-    return V;
-
-  SDValue N0 = N->getOperand(0);
-  SDValue N1 = N->getOperand(1);
-
-  bool Signed = (N->getOpcode() == AMDGPUISD::MUL_LOHI_I24);
-
-  unsigned MulLoOpc = Signed ? AMDGPUISD::MUL_I24 : AMDGPUISD::MUL_U24;
-  unsigned MulHiOpc = Signed ? AMDGPUISD::MULHI_I24 : AMDGPUISD::MULHI_U24;
-
-  SDLoc SL(N);
-
-  SDValue MulLo = DAG.getNode(MulLoOpc, SL, MVT::i32, N0, N1);
-  SDValue MulHi = DAG.getNode(MulHiOpc, SL, MVT::i32, N0, N1);
-  return DAG.getMergeValues({ MulLo, MulHi }, SL);
 }
 
 static bool isNegativeOne(SDValue Val) {
@@ -3730,6 +3697,7 @@ SDValue AMDGPUTargetLowering::performFNegCombine(SDNode *N,
   }
   case ISD::FMA:
   case ISD::FMAD: {
+    // TODO: handle llvm.amdgcn.fma.legacy
     if (!mayIgnoreSignedZero(N0))
       return SDValue();
 
@@ -3795,8 +3763,15 @@ SDValue AMDGPUTargetLowering::performFNegCombine(SDNode *N,
     SDValue Res = DAG.getNode(AMDGPUISD::FMED3, SL, VT, Ops, N0->getFlags());
     if (Res.getOpcode() != AMDGPUISD::FMED3)
       return SDValue(); // Op got folded away.
-    if (!N0.hasOneUse())
-      DAG.ReplaceAllUsesWith(N0, DAG.getNode(ISD::FNEG, SL, VT, Res));
+
+    if (!N0.hasOneUse()) {
+      SDValue Neg = DAG.getNode(ISD::FNEG, SL, VT, Res);
+      DAG.ReplaceAllUsesWith(N0, Neg);
+
+      for (SDNode *U : Neg->uses())
+        DCI.AddToWorklist(U);
+    }
+
     return Res;
   }
   case ISD::FP_EXTEND:
@@ -3933,7 +3908,7 @@ SDValue AMDGPUTargetLowering::PerformDAGCombine(SDNode *N,
       }
     }
 
-    if (DestVT.getSizeInBits() != 64 && !DestVT.isVector())
+    if (DestVT.getSizeInBits() != 64 || !DestVT.isVector())
       break;
 
     // Fold bitcasts of constants.
@@ -3942,14 +3917,12 @@ SDValue AMDGPUTargetLowering::PerformDAGCombine(SDNode *N,
     // TODO: Generalize and move to DAGCombiner
     SDValue Src = N->getOperand(0);
     if (ConstantSDNode *C = dyn_cast<ConstantSDNode>(Src)) {
-      if (Src.getValueType() == MVT::i64) {
-        SDLoc SL(N);
-        uint64_t CVal = C->getZExtValue();
-        SDValue BV = DAG.getNode(ISD::BUILD_VECTOR, SL, MVT::v2i32,
-                                 DAG.getConstant(Lo_32(CVal), SL, MVT::i32),
-                                 DAG.getConstant(Hi_32(CVal), SL, MVT::i32));
-        return DAG.getNode(ISD::BITCAST, SL, DestVT, BV);
-      }
+      SDLoc SL(N);
+      uint64_t CVal = C->getZExtValue();
+      SDValue BV = DAG.getNode(ISD::BUILD_VECTOR, SL, MVT::v2i32,
+                               DAG.getConstant(Lo_32(CVal), SL, MVT::i32),
+                               DAG.getConstant(Hi_32(CVal), SL, MVT::i32));
+      return DAG.getNode(ISD::BITCAST, SL, DestVT, BV);
     }
 
     if (ConstantFPSDNode *C = dyn_cast<ConstantFPSDNode>(Src)) {
@@ -3999,9 +3972,6 @@ SDValue AMDGPUTargetLowering::PerformDAGCombine(SDNode *N,
       return V;
     return SDValue();
   }
-  case AMDGPUISD::MUL_LOHI_I24:
-  case AMDGPUISD::MUL_LOHI_U24:
-    return performMulLoHi24Combine(N, DCI);
   case ISD::SELECT:
     return performSelectCombine(N, DCI);
   case ISD::FNEG:
@@ -4159,9 +4129,9 @@ SDValue AMDGPUTargetLowering::loadStackInputValue(SelectionDAG &DAG,
   auto SrcPtrInfo = MachinePointerInfo::getStack(MF, Offset);
   SDValue Ptr = DAG.getFrameIndex(FI, MVT::i32);
 
-  return DAG.getLoad(VT, SL, DAG.getEntryNode(), Ptr, SrcPtrInfo, 4,
+  return DAG.getLoad(VT, SL, DAG.getEntryNode(), Ptr, SrcPtrInfo, Align(4),
                      MachineMemOperand::MODereferenceable |
-                     MachineMemOperand::MOInvariant);
+                         MachineMemOperand::MOInvariant);
 }
 
 SDValue AMDGPUTargetLowering::storeStackInputValue(SelectionDAG &DAG,
@@ -4173,7 +4143,7 @@ SDValue AMDGPUTargetLowering::storeStackInputValue(SelectionDAG &DAG,
   MachinePointerInfo DstInfo = MachinePointerInfo::getStack(MF, Offset);
 
   SDValue Ptr = DAG.getConstant(Offset, SL, MVT::i32);
-  SDValue Store = DAG.getStore(Chain, SL, ArgVal, Ptr, DstInfo, 4,
+  SDValue Store = DAG.getStore(Chain, SL, ArgVal, Ptr, DstInfo, Align(4),
                                MachineMemOperand::MODereferenceable);
   return Store;
 }
@@ -4285,8 +4255,6 @@ const char* AMDGPUTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(MUL_I24)
   NODE_NAME_CASE(MULHI_U24)
   NODE_NAME_CASE(MULHI_I24)
-  NODE_NAME_CASE(MUL_LOHI_U24)
-  NODE_NAME_CASE(MUL_LOHI_I24)
   NODE_NAME_CASE(MAD_U24)
   NODE_NAME_CASE(MAD_I24)
   NODE_NAME_CASE(MAD_I64_I32)
@@ -4336,7 +4304,6 @@ const char* AMDGPUTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(ATOMIC_DEC)
   NODE_NAME_CASE(ATOMIC_LOAD_FMIN)
   NODE_NAME_CASE(ATOMIC_LOAD_FMAX)
-  NODE_NAME_CASE(ATOMIC_LOAD_CSUB)
   NODE_NAME_CASE(BUFFER_LOAD)
   NODE_NAME_CASE(BUFFER_LOAD_UBYTE)
   NODE_NAME_CASE(BUFFER_LOAD_USHORT)
@@ -4365,8 +4332,6 @@ const char* AMDGPUTargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(BUFFER_ATOMIC_CMPSWAP)
   NODE_NAME_CASE(BUFFER_ATOMIC_CSUB)
   NODE_NAME_CASE(BUFFER_ATOMIC_FADD)
-  NODE_NAME_CASE(BUFFER_ATOMIC_PK_FADD)
-  NODE_NAME_CASE(ATOMIC_PK_FADD)
 
   case AMDGPUISD::LAST_AMDGPU_ISD_NUMBER: break;
   }
@@ -4718,6 +4683,12 @@ bool AMDGPUTargetLowering::isKnownNeverNaNForTargetNode(SDValue Op,
     case Intrinsic::amdgcn_fdot2:
       // TODO: Refine on operand
       return SNaN;
+    case Intrinsic::amdgcn_fma_legacy:
+      if (SNaN)
+        return true;
+      return DAG.isKnownNeverNaN(Op.getOperand(1), SNaN, Depth + 1) &&
+             DAG.isKnownNeverNaN(Op.getOperand(2), SNaN, Depth + 1) &&
+             DAG.isKnownNeverNaN(Op.getOperand(3), SNaN, Depth + 1);
     default:
       return false;
     }
