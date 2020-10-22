@@ -27,9 +27,19 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
+using Microsoft.VisualStudio;
+using System.Diagnostics;
+using System.Runtime.Remoting;
+using EnvDTE80;
+using Microsoft.VisualStudio.VCProjectEngine;
+using System.Xml;
+using System.Xml.XPath;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace LLVM.ClangFormat
 {
+
     [ClassInterface(ClassInterfaceType.AutoDual)]
     [CLSCompliant(false), ComVisible(true)]
     public class OptionPageGrid : DialogPage
@@ -181,9 +191,9 @@ namespace LLVM.ClangFormat
 
         [Category("Format On Save")]
         [DisplayName("Enable")]
-        [Description("Enable running clang-format when modified files are saved. " +
+        [Description("Enable running clang-format when modified files are saved.\n" +
                      "Will only format if Style is found (ignores Fallback Style).\n" +
-                     "Will only format if in the root directory a .autoformat file is found."
+                     "Will only format if <AUTOFORMAT>1</AUTOFORMAT> is set on the project."
             )]
         public bool FormatOnSave
         {
@@ -215,21 +225,33 @@ namespace LLVM.ClangFormat
     [PackageRegistration(UseManagedResourcesOnly = true)]
     [InstalledProductRegistration("#110", "#112", "1.0", IconResourceID = 400)]
     [ProvideMenuResource("Menus.ctmenu", 1)]
-    [ProvideAutoLoad(UIContextGuids80.SolutionExists)] // Load package on solution load
+    ////[ProvideAutoLoad(UIContextGuids80.SolutionExists)] // Load package on solution load
+    //[ProvideAutoLoad(VSConstants.UICONTEXT.NoSolution_string)]
+    //[ProvideAutoLoad(VSConstants.UICONTEXT.SolutionExists_string)]
+    //[ProvideAutoLoad(VSConstants.UICONTEXT.SolutionHasMultipleProjects_string)]
+    //[ProvideAutoLoad(VSConstants.UICONTEXT.SolutionHasSingleProject_string)]
+    //[ProvideAutoLoad(Microsoft.VisualStudio.Shell.Interop.UIContextGuids80.SolutionExists)]
+    [ProvideAutoLoad(VSConstants.UICONTEXT.SolutionExistsAndFullyLoaded_string, PackageAutoLoadFlags.BackgroundLoad)]
     [Guid(GuidList.guidClangFormatPkgString)]
     [ProvideOptionPage(typeof(OptionPageGrid), "LLVM/Clang", "ClangFormat", 0, 0, true)]
-    public sealed class ClangFormatPackage : Package
+    public sealed class ClangFormatPackage : AsyncPackage
     {
         #region Package Members
 
         RunningDocTableEventsDispatcher _runningDocTableEventsDispatcher;
+        static Guid OUTPUT_WINDOW_GUID = new Guid("EEC912A4-A8FB-403D-A03D-8E884DA049A5");
+        static string OUTPUT_WINDOW_TITLE = "Clang Format by Viz";
+        IVsOutputWindowPane customPane;
 
-        protected override void Initialize()
+        protected override async System.Threading.Tasks.Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
         {
-            base.Initialize();
-
             _runningDocTableEventsDispatcher = new RunningDocTableEventsDispatcher(this);
             _runningDocTableEventsDispatcher.BeforeSave += OnBeforeSave;
+
+            IVsOutputWindow outWindow = GetService(typeof(SVsOutputWindow)) as IVsOutputWindow;
+
+            outWindow.CreatePane(ref OUTPUT_WINDOW_GUID, OUTPUT_WINDOW_TITLE, 1, 1);
+            outWindow.GetPane(ref OUTPUT_WINDOW_GUID, out customPane);
 
             var commandService = GetService(typeof(IMenuCommandService)) as OleMenuCommandService;
             if (commandService != null)
@@ -246,7 +268,9 @@ namespace LLVM.ClangFormat
                     commandService.AddCommand(menuItem);
                 }
             }
+
         }
+
         #endregion
 
         OptionPageGrid GetUserOptions()
@@ -294,7 +318,13 @@ namespace LLVM.ClangFormat
             DTE dte = (DTE)GetService(typeof(DTE));
             string solutionDir = System.IO.Path.GetDirectoryName(dte.Solution.FullName);
             string autoFormatFile = System.IO.Path.GetFullPath(Path.Combine(solutionDir, @"..\..\.autoformat"));
-            if (!File.Exists(autoFormatFile))
+            if (File.Exists(autoFormatFile))
+            {
+                customPane.OutputString("-> .autoformat found but not supported any longer. Please remove it and use a CMake property instead on the project:\n");
+                customPane.OutputString("\t set_target_properties(<TARGET> PROPERTIES VS_GLOBAL_AUTOFORMAT 1)\n");
+            }
+
+            if (!FindAutoFormatProperty())
                 return;
 
             var optionsWithNoFallbackStyle = GetUserOptions().Clone();
@@ -387,7 +417,7 @@ namespace LLVM.ClangFormat
         /// 
         /// Formats the text in range start and end.
         /// </summary>
-        private static string RunClangFormat(string text, int start, int end, string path, string filePath, OptionPageGrid options)
+        private string RunClangFormat(string text, int start, int end, string path, string filePath, OptionPageGrid options)
         {
             string vsixPath = Path.GetDirectoryName(
                 typeof(ClangFormatPackage).Assembly.Location);
@@ -407,6 +437,9 @@ namespace LLVM.ClangFormat
                                           " -output-replacements-xml " +
                                           " -fallback-style \"" + fallbackStyle + "\"";
 
+            customPane.Activate();
+            customPane.OutputString("\n============== " + string.Format("{0:HH:mm:ss tt}", DateTime.Now) + " ==============\n");
+
             bool usingGlobalClangFile = true;
 
             string globalClangFile = options.GlobalClangFile;
@@ -422,10 +455,15 @@ namespace LLVM.ClangFormat
                 {
                     DialogResult dialogResult = MessageBox.Show("CLang file not found:\n\n" + globalClangFile + "\n\nDo you want to use the fallback method ('" + style + "')?", "CLang file not found", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
                     if (dialogResult == DialogResult.No)
+                    {
+                        customPane.OutputString("-> Not formatting file.. \n");
                         return "";
+                    }
                 }
                 else
                 {
+                    customPane.OutputString("-> USing following file to format: \n");
+                    customPane.OutputString("\t" + globalClangFile + "\n");
                     string clangFileContent = File.ReadAllText(globalClangFile, Encoding.UTF8);
                     clangFileContent = Regex.Replace(clangFileContent, @"\r\n?|\n", " ");
                     process.StartInfo.Arguments += " -style \"" + clangFileContent + "\"";
@@ -433,6 +471,7 @@ namespace LLVM.ClangFormat
             }
             else
             {
+                customPane.OutputString("-> Global clang file is not set!\n");
                 usingGlobalClangFile = false;
             }
 
@@ -459,6 +498,8 @@ namespace LLVM.ClangFormat
             //    standard input.
             try
             {
+                customPane.OutputString("-> Using following arguments to format:\n");
+                customPane.OutputString("\t" + process.StartInfo.Arguments + "\n");
                 process.Start();
             }
             catch (Exception e)
@@ -486,6 +527,7 @@ namespace LLVM.ClangFormat
                 // we will never reach this point; instead, read the standard error asynchronously.
                 throw new Exception(process.StandardError.ReadToEnd());
             }
+            customPane.OutputString("-> Formatting finished.\n");
             return output;
         }
 
@@ -513,6 +555,38 @@ namespace LLVM.ClangFormat
                 edit.Replace(span, replacement.Value);
             }
             edit.Apply();
+        }
+
+        private bool FindAutoFormatProperty()
+        {
+            DTE2 dte = Package.GetGlobalService(typeof(SDTE)) as DTE2;
+            Project p = dte.ActiveDocument.ProjectItem.ContainingProject;
+            VCProject p2 = (VCProject)p.Object;
+
+            string projectFile = p2.ProjectFile;
+
+            XmlDocument xmlDoc = new XmlDocument();
+            xmlDoc.Load(projectFile);
+
+            XPathNavigator nav = xmlDoc.CreateNavigator();
+
+            nav.MoveToRoot();
+            nav.MoveToFirstChild();
+            nav.MoveToNext();
+            string xmlNs = nav.NamespaceURI;
+            XmlNamespaceManager nsMgr = new XmlNamespaceManager(new NameTable());
+            nsMgr.AddNamespace("x", xmlNs);
+            XPathNodeIterator autoformatIt = nav.Select("//x:AUTOFORMAT", nsMgr);
+            if (autoformatIt.Count > 0)
+            {
+                while (autoformatIt.MoveNext())
+                {
+                    if (autoformatIt.Current.Value == "1")
+                        return true;
+                }
+            }
+
+            return false;
         }
     }
 }
